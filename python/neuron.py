@@ -1,6 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
+NEURON 9 — OMNI-ADAPTIVE: TREINO ONLINE, PERFIS, HF E ARENA
+================================================================
+Tudo permanece neste arquivo. NumPy + stdlib para o núcleo; pyarrow opcional
+para Arrow IPC/Feather/Parquet, Torch/Transformers opcionais para T5/BART/ByT5.
+Não implementa um decoder Parquet incompleto nem chama isso de suporte padrão.
+Modelos somente decoder (Llama, RWKV, Mamba comuns) continuam rejeitados: este
+é um agente Encoder–Decoder. Backbones Torch ficam congelados; a ponte própria
+é treinada. A RNN NumPy atualiza todos os parâmetros individuais por BPTT.
+
+No chat novo, uso treina reconstrução do texto do usuário e cálculos com recibo
+verificado. A saída do próprio modelo não vira rótulo verdadeiro. /aprender
+ligar|desligar controla o treino online. Replay do MESMO espaço de parâmetros,
+cone G delta<=0, checagem de arredondamento e probes finitos podem vetar passos.
+TCP não elimina esquecimento; C delta=0 não define moralidade ou alinhamento.
+/modo restrito acrescenta constituição numérica. /modo irrestrito usa maior
+plasticidade, mantendo TCP, checagens numéricas e permissões do harness.
+Irrestrito não libera shell arbitrário, sensores, tráfego ou reescrita geral.
+
+/modelo google/flan-t5-base [--offline] troca o backbone sem reinício. Dimensões
+são detectadas. Migração usa projeção ortogonal e SVD de baixo posto da ponte;
+ela não preserva semântica garantidamente. Gate de retenção finito pode rejeitar.
+Memórias e estado anterior são guardados; treinamento usa a ponte, não 70B pesos.
+
+/hf tatsu-lab/alpaca --split train --limit 256 baixa e treina com avaliação.
+/hf owner/dataset --file data/train.parquet --revision COMMIT fixa um shard.
+API /rows é paginada, sem datasets e sem executar código do repositório. Downloads
+ficam limitados, com SHA-256, split/config/revisão/procedência. main é snapshot
+móvel, não revisão imutável. Arrow/Parquet são lidos em batches por pyarrow.
+
+/benchmark gsm8k|mmlu|arc|humaneval [--file arquivo] [--limit 50]
+Arena não treina, não consulta o roteador OMNIMAT e não inventa notas. MMLU/ARC
+usam soma de log-probabilidades das opções; GSM8K usa resposta numérica exata.
+HumanEval exporta completions, NÃO reporta pass@1 sem harness externo isolado.
+/arena mostra medições locais. /arena referencias referencias.jsonl recebe
+notas externas com source_url e protocol_id. Protocolos diferentes são marcados
+não comparáveis; uma referência fornecida não foi verificada independentemente.
+Não existem notas embutidas de GPT/Llama nem promessa de zero alucinações.
+
+/perfil criar alice --model numpy:tiny --mode restrito
+/perfil usar bob; /perfil listar; /conversar alice bob "tema"
+Cada perfil tem SQLite, pesos, replay e permissões próprios; até oito abertos.
+Mensagens de outros perfis são identificadas e não viram rótulos online confiáveis.
+    python neuron.py agent --profile alice --model numpy:tiny --mode irrestrito
+/auto iniciar --rounds 0 --professor --dataset treino.arrow --grow --prune --benchmark gsm8k
+Zero rodadas significa continuar até /auto parar, opt-in, com pausas e limites
+por operação. Arena opcional compara antes/depois e reverte o aprendiz se piorar
+num protocolo compatível. Código só muda no contrato escalar comprovado da v8.
+
+DOCUMENTAÇÃO HISTÓRICA PRESERVADA (padrões antigos podem diferir)
 NEURON 8.2 — CONVERSA, ESFORÇO PERSONALIZADO, IMPORTAÇÃO E EVOLUÇÃO QUENTE
 /esforco baixo|medio|alto|muito_alto|maximo; /esforco 96 e /esforco +
 configuram até 256 passos extras por token. Até 8192 recorrências por chamada;
@@ -709,7 +758,7 @@ except ImportError as exc:
     except (subprocess.SubprocessError, ImportError) as error:
         raise SystemExit("Instalação não concluída: " + str(error)) from error
 
-__version__ = "8.2.0"
+__version__ = "9.0.0"
 EPS = 1e-12
 Array = np.ndarray
 Params = dict[str, Array]
@@ -10450,7 +10499,7 @@ class SyntheticCurriculum:
     def start(self,identity='NEURON-1',*,teacher=False,interval=2.,idle_seconds=2.,steps=1):
         if type(teacher) is not bool or not .2<=interval<=60 or not .2<=idle_seconds<=60 or type(steps) is not int or not 1<=steps<=4:raise ValueError('Limites do currículo inválidos')
         self.lab._require_model();self.lab._agent(identity)
-        if not isinstance(self.lab.backend,(NativeSeq2Seq,CompactEncoderDecoder)):raise ValueError('Currículo local usa NumPy nativo ou compacto, sem alterar T5 congelado')
+        if not isinstance(self.lab.backend,(NativeSeq2Seq,CompactEncoderDecoder,EncoderDecoderCore)):raise ValueError('Currículo local usa NumPy nativo ou compacto, sem alterar T5 congelado')
         if isinstance(self.lab.backend,NativeSeq2Seq) and self.lab.backend.dimension>64:raise ValueError('Currículo limita o núcleo nativo a dimensão 64')
         if self.thread and self.thread.is_alive():raise ValueError('Currículo já está ativo')
         self.identity,self.mode,self.interval,self.idle_seconds,self.steps=identity,'verified_teacher' if teacher else 'selfplay',float(interval),float(idle_seconds),steps
@@ -10481,7 +10530,7 @@ class SyntheticCurriculum:
 def curriculum_step_impl(lab,identity,teacher=False,steps=1,family=None):
     if type(teacher) is not bool or type(steps) is not int or not 1<=steps<=4:raise ValueError('Parâmetros de currículo inválidos')
     lab._require_model();core=lab.backend
-    if not isinstance(core,(NativeSeq2Seq,CompactEncoderDecoder)) or isinstance(core,NativeSeq2Seq) and core.dimension>64:raise ValueError('Currículo usa modelos NumPy pequenos')
+    if not isinstance(core,(NativeSeq2Seq,CompactEncoderDecoder,EncoderDecoderCore)) or isinstance(core,NativeSeq2Seq) and core.dimension>64:raise ValueError('Currículo usa modelos NumPy pequenos')
     agent=lab._agent(identity);agent.ensure_bridge(core);state=lab.synthetic_state;rng=np.random.default_rng();rng.bit_generator.state=state['rng']
     problem=generate_synthetic_problem(rng,family);observations=agent.unit.steps;context=agent.last_context.copy()
     # O aprendiz é consultado ANTES do solver; não passa pelo roteador que forneceria a resposta.
@@ -10491,13 +10540,13 @@ def curriculum_step_impl(lab,identity,teacher=False,steps=1,family=None):
     state['attempts']+=1;state['solved']+=int(solved);state['rng']=rng.bit_generator.state;report=None;accepted=False;train_source=None
     if solved or teacher:
         train_source='verified_selfplay' if solved else 'verified_synthetic_teacher';state['teacher_labels']+=int(not solved)
-        before={k:v.copy() for k,v in agent.bridge.arrays.items()}
+        before=_bridge_arrays(agent.bridge)
         probes=[('Calcule 2 + 3. Só o número.','5'),('MDC de 6 e 9. Só o número.','3'),('Calcule 2 * 4. Só o número.','8')]
         def retention():
-            if isinstance(core,NativeSeq2Seq):return float(np.mean([core.loss_grad(core.encode(q),agent.bridge,np.zeros(48),a)[0] for q,a in probes]))
+            if not isinstance(core,CompactEncoderDecoder):return float(np.mean([bridge_loss_grad(core,core.encode(q),agent.bridge,np.zeros(48),a)[0] for q,a in probes]))
             return float(np.mean([agent.bridge.language().coding_metrics(a)['bits_per_byte'] for q,a in probes]))
-        old_loss=retention();report=core.teach(core.encode(problem['prompt']),agent.bridge,context,target,steps=steps,rate=.1);new_loss=retention();accepted=math.isfinite(new_loss) and new_loss<=old_loss+.02
-        if not accepted:agent.bridge.arrays=before;state['training_rejected']+=1
+        old_loss=retention();report=tcp_train_pair(core,agent.bridge,problem['prompt'],target,context,constitution=lab.config.constitutional_projection,rate=.03) if isinstance(core,EncoderDecoderCore) else core.teach(core.encode(problem['prompt']),agent.bridge,context,target,steps=steps,rate=.1);new_loss=retention();accepted=math.isfinite(new_loss) and new_loss<=old_loss+.02
+        if not accepted:_restore_bridge(core,agent.bridge,before);state['training_rejected']+=1
         else:state['training_accepted']+=1
         report.update(retention_before=old_loss,retention_after=new_loss,retention_tolerance=.02,accepted=accepted,source=train_source)
     if agent.unit.steps!=observations:raise AssertionError('Currículo não pode criar observações reais')
@@ -11257,8 +11306,11 @@ class LabConfig:
     reasoning_custom_seconds: float = 20.
     inference_seconds: float = 5.
     constitutional_projection: bool = False
+    online_learning: bool = False
+    evolution_mode: str = "restrito"
 
     def __post_init__(self):
+        if type(self.online_learning) is not bool or self.evolution_mode not in ("restrito","irrestrito"):raise ValueError("Configuração de aprendizado/modo inválida")
         if self.reasoning_effort not in ("baixo","medio","alto","muito_alto","maximo","personalizado") or type(self.reasoning_visible) is not bool:raise ValueError("Preferências de raciocínio inválidas")
         if type(self.reasoning_custom_budget) is not int or not 0<=self.reasoning_custom_budget<=256 or type(self.reasoning_custom_seconds) not in (int,float) or not math.isfinite(self.reasoning_custom_seconds) or not .1<=self.reasoning_custom_seconds<=30:raise ValueError("Orçamento personalizado: 0–256 passos, .1–30 s")
         if type(self.thought_budget) is not int or not 0<=self.thought_budget<=256 or type(self.constitutional_projection) is not bool:raise ValueError("Orçamento/constituição inválidos")
@@ -11570,6 +11622,7 @@ class DialogueNeuron:
         self.unit = CognitiveUnit(Config(sensory_dim=32, motor_dim=4, ensemble_size=2,
             episodic_capacity=64, planning_horizon=1, planning_candidates=4, planning_iterations=1,
             vsa_dim=64, symbolic_capacity=32, meta_every=16, meta_window=8, **base))
+        self.online_replay=deque(maxlen=16);self.last_online=None
         self.bridge = None
         self.saved_bridge = None
         self.motor_policy=DesktopMotorPolicy();self.sensor_features=None
@@ -11648,7 +11701,7 @@ class DialogueNeuron:
             messages=list(self.messages), last_text=self.last_text,
             formal_steps=self.formal_router.steps,formal_numpy=self.last_formal_numpy,
             formal_result=self.last_formal,hypotheses=list(self.hypotheses),sensor_source=self.sensor_source,
-            bridge_ready=self.bridge is not None, transformer_stamp=None if self.last_transformer is None else self.last_transformer.get("stamp"))
+            online_training=self.last_online,bridge_ready=self.bridge is not None, transformer_stamp=None if self.last_transformer is None else self.last_transformer.get("stamp"))
 
 
 def lab_operation(method):
@@ -11691,8 +11744,8 @@ class NeuronLaboratory:
         self.backend = backend
         self.last_error = ""
         self._view = {}
-        self.closed = False
-        self.last_activity=time.monotonic();self.synthetic_state=synthetic_state();self.curriculum=SyntheticCurriculum(self);self.auto_improvement_state=dict(rounds=0,recent=[])
+        self.closed = False;self._legacy_online_config=False
+        self.last_activity=time.monotonic();self.synthetic_state=synthetic_state();self.curriculum=SyntheticCurriculum(self);self.auto_improvement_state=dict(rounds=0,recent=[]);self.arena_state=dict(runs=[],references=[])
         try:
             self.history = EventHistory(self.directory / "history.sqlite", min_free_mb=min_free_mb)
             self.semantic_memory=HDCSemanticMemory(self.history)
@@ -11748,7 +11801,7 @@ class NeuronLaboratory:
                 model=self.config.model, agents=[a.view() for a in self.agents],
                 metrics=list(self.metrics), error=self.last_error,
                 formal_race=None if self.formal_race is None else list(self.formal_race.recent),
-                auto_improvement_state=self.auto_improvement_state,semantic_memory=self.semantic_memory.stats(),runtime_kernels=RUNTIME_KERNELS.status(),synthetic_state=self.synthetic_state,curriculum=self.curriculum.status(),
+                arena_state=self.arena_state,online_learning=self.config.online_learning,evolution_mode=self.config.evolution_mode,auto_improvement_state=self.auto_improvement_state,semantic_memory=self.semantic_memory.stats(),runtime_kernels=RUNTIME_KERNELS.status(),synthetic_state=self.synthetic_state,curriculum=self.curriculum.status(),
                 storage=str(self.history.path), legend="Ativações e planos numéricos são observações; mensagens são saídas do decoder."))
 
     def view(self, *, include_transformers=False):
@@ -12061,6 +12114,7 @@ class NeuronLaboratory:
             turn=agent.turns,inspection=inspection,neural_action=action,transition_learned=reconciliation['learned'],
             formal_result=receipt,decoder_commentary=commentary if receipt is not None else None,
             authority='OMNIMAT result only; decoder commentary is unverified' if receipt is not None else 'neural_generation')
+        if self.config.online_learning and source=="usuario":event["online_training"]=on_user_interaction_turn(self,identity,message,event)
         self.history.append('lab.dialogue',identity,event)
         self.semantic_memory.add(identity,message,answer[:8000],kind='formal_result' if receipt is not None else 'dialogue')
         if isinstance(agent.bridge,CompactBridge) and agent.bridge.language().tokenizer is not None:agent.bridge.language().tokenizer.persist(self.history,identity)
@@ -12116,7 +12170,7 @@ class NeuronLaboratory:
         agent.ensure_bridge(self.backend)
         encoded=self.backend.encode(agent.prompt(question,[]))
         context=agent.context(encoded["features"],agent.last_action)
-        result=self.backend.teach(encoded,agent.bridge,context,answer,steps=steps)
+        result=teach_with_tcp(self,agent,question,answer,context,steps) if self.config.online_learning and not isinstance(self.backend,CompactEncoderDecoder) else self.backend.teach(encoded,agent.bridge,context,answer,steps=steps)
         memory_features = self.backend.encode(question)["features"]
         retained = [m for m in agent.memories if m["question"] != question]
         agent.memories.clear()
@@ -12132,7 +12186,7 @@ class NeuronLaboratory:
         state=dict(format="neuron-laboratory",version=1,config=dataclasses.asdict(self.config),
             rng=self.rng.bit_generator.state,population=self.population,archive=list(self.archive),
             rounds=self.rounds,metrics=list(self.metrics),agents=[],base_signature=self.expected_signature,
-            has_formal_race=self.formal_race is not None,synthetic_state=self.synthetic_state,auto_improvement_state=self.auto_improvement_state)
+            has_formal_race=self.formal_race is not None,synthetic_state=self.synthetic_state,auto_improvement_state=self.auto_improvement_state,arena_state=self.arena_state)
         output=io.BytesIO()
         with zipfile.ZipFile(output,"w",zipfile.ZIP_DEFLATED) as archive:
             for agent in self.agents:
@@ -12144,7 +12198,7 @@ class NeuronLaboratory:
                     last_formal=agent.last_formal,last_formal_numpy=agent.last_formal_numpy,
                     motor_policy=agent.motor_policy.dump(),sensor_features=agent.sensor_features,
                     sensor_source=agent.sensor_source,hypotheses=list(agent.hypotheses),
-                    memories=list(agent.memories),last_text=agent.last_text,last_prompt=agent.last_prompt,has_bridge=arrays is not None)
+                    online_replay=list(agent.online_replay),last_online=agent.last_online,memories=list(agent.memories),last_text=agent.last_text,last_prompt=agent.last_prompt,has_bridge=arrays is not None)
                 state["agents"].append(record)
                 for name,model in (("task",agent.task),("quality",agent.quality),("unit",agent.unit),("formal_router",agent.formal_router)):
                     archive.writestr(prefix+"/"+name,_checkpoint_bytes(model))
@@ -12164,9 +12218,12 @@ class NeuronLaboratory:
             state=json.loads(archive.read("state.json"))
             if state.get("format")!="neuron-laboratory" or state.get("version")!=1:
                 raise ValueError("Formato de laboratório incompatível")
+            self._legacy_online_config="online_learning" not in state["config"]
             self.config=LabConfig(**state["config"])
             self.synthetic_state=state.get("synthetic_state",synthetic_state())
             self.auto_improvement_state=state.get("auto_improvement_state",dict(rounds=0,recent=[]))
+            self.arena_state=state.get("arena_state",dict(runs=[],references=[]))
+            if len(self.arena_state.get("runs",[]))>64 or len(self.arena_state.get("references",[]))>256:raise ValueError("Arena excede capacidade")
             if type(self.auto_improvement_state.get("rounds")) is not int or self.auto_improvement_state["rounds"]<0 or len(self.auto_improvement_state.get("recent",[]))>32:raise ValueError("Estado de auto-melhoria inválido")
             if self.synthetic_state.get("version")!=1 or len(self.synthetic_state.get("recent",[]))>32:raise ValueError("Estado sintético inválido")
             self.expected_signature=state.get("base_signature")
@@ -12213,6 +12270,12 @@ class NeuronLaboratory:
                     raise ValueError("Memória de diálogo excede capacidade")
                 for memory in record["memories"]:
                     _vector(memory["features"],32,"memory")
+                replay=record.get('online_replay',[])
+                if not isinstance(replay,list) or len(replay)>16:raise ValueError('Replay online inválido')
+                for row in replay:
+                    if not isinstance(row,(list,tuple)) or len(row)!=3 or not all(isinstance(t,str) and 1<=len(t)<=2000 for t in row[:2]):raise ValueError('Exemplo online inválido')
+                    _vector(row[2],48,'online_context')
+                agent.online_replay.extend(replay);agent.last_online=record.get('last_online')
                 agent.memories.extend(record["memories"])
                 agent.messages.extend(record["messages"])
                 agent.turns=_count(record["turns"],"turns")
@@ -12358,6 +12421,12 @@ LAB_HTML=LAB_HTML.replace('<footer>',base64.b64decode(EIGHT_HTML_B64).decode()+'
 LAB_HTML=LAB_HTML.replace('</script></body>',base64.b64decode(EIGHT_JS_B64).decode()+'\n</script></body>')
 LAB_HTML=LAB_HTML.replace("if(event.kind==='lab.seed.result')", "if(event.kind==='lab.eight.result')$('eight-result').textContent=JSON.stringify(payload.result,null,2);if(event.kind==='curriculum.attempt')$('eight-curriculum-result').textContent=JSON.stringify(payload,null,2);if(event.kind==='lab.seed.result')")
 
+NINE_HTML_B64='PHNlY3Rpb24gaWQ9Im5pbmUiIGNsYXNzPSJwYW5lIj48ZGl2IGNsYXNzPSJzcGxpdCI+PGRpdiBjbGFzcz0iY2FyZCI+PGgzPlBsYXN0aWNpZGFkZSBvbmxpbmU8L2gzPjxsYWJlbD48aW5wdXQgaWQ9Im5pbmUtb25saW5lIiB0eXBlPSJjaGVja2JveCIgY2hlY2tlZD4gQXByZW5kZXIgdGV4dG8gZG8gdXN1w6FyaW8gZHVyYW50ZSBvIHVzbzwvbGFiZWw+PHNlbGVjdCBpZD0ibmluZS1tb2RlIj48b3B0aW9uIHZhbHVlPSJyZXN0cml0byI+UmVzdHJpdG8gwrcgY29uc3RpdHVpw6fDo28gbnVtw6lyaWNhPC9vcHRpb24+PG9wdGlvbiB2YWx1ZT0iaXJyZXN0cml0byI+SXJyZXN0cml0byDCtyBwbGFzdGljaWRhZGUgYWdyZXNzaXZhPC9vcHRpb24+PC9zZWxlY3Q+PGJ1dHRvbiBpZD0ibmluZS1tb2RlLXNldCI+QXBsaWNhcjwvYnV0dG9uPjxwIGNsYXNzPSJoaW50Ij5UQ1AgZSBwcm9iZXMgc8OjbyBwcm90ZcOnw6NvIGxvY2FsLCBzZW0gZ2FyYW50aWEgZGUgYXVzw6puY2lhIGRlIGVzcXVlY2ltZW50by4gUGVybWlzc8O1ZXMgZGUgZmVycmFtZW50YXMgbsOjbyBtdWRhbS48L3A+PGgzPkJhY2tib25lIEVuY29kZXLigJNEZWNvZGVyPC9oMz48aW5wdXQgaWQ9Im5pbmUtbW9kZWwiIHZhbHVlPSJnb29nbGUvZmxhbi10NS1iYXNlIiBhcmlhLWxhYmVsPSJNb2RlbG8iPjxidXR0b24gaWQ9Im5pbmUtbW9kZWwtc2V0Ij5CYWl4YXIgZSB0cm9jYXI8L2J1dHRvbj48cCBjbGFzcz0iaGludCI+QSBwb250ZSBpbmRpdmlkdWFsIGFwcmVuZGU7IGJhY2tib25lIFRvcmNoIGNvbmdlbGFkby4gTWlncmHDp8OjbyBTVkQgZSByZXRlbsOnw6NvIGZpbml0YSBwb2RlbSByZWplaXRhciBhIHRyb2NhLjwvcD48aDM+SHVnZ2luZyBGYWNlPC9oMz48aW5wdXQgaWQ9Im5pbmUtcmVwbyIgdmFsdWU9InRhdHN1LWxhYi9hbHBhY2EiIGFyaWEtbGFiZWw9IkRhdGFzZXQiPjxidXR0b24gaWQ9Im5pbmUtaGYiPkJhaXhhciBhdMOpIDI1NiBlIHRyZWluYXI8L2J1dHRvbj48cHJlIGlkPSJuaW5lLXN0YXRlIj48L3ByZT48L2Rpdj48ZGl2IGNsYXNzPSJjYXJkIj48aDM+QXJlbmEgwrcgbWVkacOnw7VlcyBlIHByb2NlZMOqbmNpYTwvaDM+PHNlbGVjdCBpZD0ibmluZS1iZW5jaG1hcmsiPjxvcHRpb24+Z3NtOGs8L29wdGlvbj48b3B0aW9uPm1tbHU8L29wdGlvbj48b3B0aW9uPmFyYzwvb3B0aW9uPjxvcHRpb24+aHVtYW5ldmFsPC9vcHRpb24+PC9zZWxlY3Q+PGJ1dHRvbiBpZD0ibmluZS1ldmFsIj5BdmFsaWFyIGF0w6kgMjAgcXVlc3TDtWVzPC9idXR0b24+PHAgY2xhc3M9ImhpbnQiPlNlbSB0cmVpbm8gbmVtIGFzc2lzdMOqbmNpYSBPTU5JTUFUIGR1cmFudGUgYSBub3RhLiBTdWJzZXRzIG7Do28gc8OjbyBhIHN1w610ZSBjb21wbGV0YS4gSHVtYW5FdmFsIGV4cG9ydGEgY29tcGxldGlvbnMgZSBuw6NvIGludmVudGEgcGFzc0AxLiBSZWZlcsOqbmNpYXMgZXh0ZXJuYXMgZGUgcHJvdG9jb2xvcyBkaWZlcmVudGVzIG7Do28gc8OjbyBjb21wYXLDoXZlaXMuPC9wPjxwcmUgaWQ9Im5pbmUtYXJlbmEiPjwvcHJlPjxwIGNsYXNzPSJoaW50Ij5ObyBjaGF0OiAvcGVyZmlsIGNyaWFyIGFsaWNlIC0tbW9kZWwgbnVtcHk6dGlueTsgL3BlcmZpbCB1c2FyIGJvYjsgL2NvbnZlcnNhciBhbGljZSBib2IgInRlbWEiLiBDYWRhIHBlcmZpbCB0ZW0gc3VhIHByw7NwcmlhIHBhc3RhLCBTUUxpdGUgZSBwZXNvcy48L3A+PC9kaXY+PC9kaXY+PC9zZWN0aW9uPgo='
+NINE_JS_B64='JCgnbmluZS1tb2RlLXNldCcpLm9uY2xpY2s9KCk9PmpvYignbmluZV9tb2RlJyx7bW9kZTokKCduaW5lLW1vZGUnKS52YWx1ZSxvbmxpbmU6JCgnbmluZS1vbmxpbmUnKS5jaGVja2VkfSk7CiQoJ25pbmUtbW9kZWwtc2V0Jykub25jbGljaz0oKT0+am9iKCduaW5lX3N3YXAnLHttb2RlbDokKCduaW5lLW1vZGVsJykudmFsdWV9KTsKJCgnbmluZS1oZicpLm9uY2xpY2s9KCk9PmpvYignbmluZV9oZicse3JlcG86JCgnbmluZS1yZXBvJykudmFsdWUsbGltaXQ6MjU2fSk7CiQoJ25pbmUtZXZhbCcpLm9uY2xpY2s9KCk9PmpvYignbmluZV9iZW5jaG1hcmsnLHtuYW1lOiQoJ25pbmUtYmVuY2htYXJrJykudmFsdWUsbGltaXQ6MjB9KTsKY29uc3QgcmVuZGVyQmVmb3JlTmluZT1yZW5kZXI7cmVuZGVyPWZ1bmN0aW9uKCl7cmVuZGVyQmVmb3JlTmluZSgpO2lmKCFzdGF0ZSlyZXR1cm47JCgnbmluZS1zdGF0ZScpLnRleHRDb250ZW50PUpTT04uc3RyaW5naWZ5KHttb2RlOnN0YXRlLmV2b2x1dGlvbl9tb2RlLG9ubGluZTpzdGF0ZS5vbmxpbmVfbGVhcm5pbmcsYWdlbnRzOnN0YXRlLmFnZW50cy5tYXAoYT0+KHtpZDphLmlkLHRyYWluaW5nOmEub25saW5lX3RyYWluaW5nfSkpfSxudWxsLDIpOyQoJ25pbmUtYXJlbmEnKS50ZXh0Q29udGVudD1KU09OLnN0cmluZ2lmeShzdGF0ZS5hcmVuYV9zdGF0ZXx8e30sbnVsbCwyKTt9Owo='
+LAB_HTML=LAB_HTML.replace('</nav>','<button data-tab="nine">14 · NEURON 9</button></nav>')
+LAB_HTML=LAB_HTML.replace('<footer>',base64.b64decode(NINE_HTML_B64).decode()+'<footer>',1)
+LAB_HTML=LAB_HTML.replace('</script></body>',base64.b64decode(NINE_JS_B64).decode()+'\n</script></body>')
+
 class LaboratoryWorker:
     """Uma fila limitada e um único escritor para todos os trabalhos do painel."""
     def __init__(self, lab: NeuronLaboratory):
@@ -12380,7 +12449,7 @@ class LaboratoryWorker:
     def submit(self, item):
         action = item.get("action")
         allowed = {"run","run_social","run_formal","calculate","simulate","sleep_formal","category","formal_step","stop","step","social","load","reply","feedback","teach","inspect","verify"}
-        allowed |= SEED_ACTIONS | ADVANCED_ACTIONS | EIGHT_ACTIONS
+        allowed |= SEED_ACTIONS | ADVANCED_ACTIONS | EIGHT_ACTIONS | NINE_ACTIONS
         if action not in allowed:
             raise ValueError("Ação desconhecida")
         if action == "stop":
@@ -12429,6 +12498,7 @@ class LaboratoryWorker:
         if action=='sleep_formal': return self.lab.sleep_formal(identity,item.get('scenario','heat'),item.get('parameters',{}))
         if action=='category': return self.lab.category(identity,item.get('spec',{}))
         if action=='formal_step': return self.lab.formal_step()
+        if action in NINE_ACTIONS:return nine_web_action(self.lab,item)
         if action in EIGHT_ACTIONS:return self.lab.eight_action(item)
         if action in ADVANCED_ACTIONS:return self.lab.advanced_action(item)
         if action in SEED_ACTIONS:return self.lab.seed_action(item)
@@ -12545,7 +12615,7 @@ def make_lab_server(lab: NeuronLaboratory, worker: LaboratoryWorker, port: int =
                     after=int(query.get("after",["0"])[0]);_count(after,"after")
                     reader=sqlite3.connect(lab.history.path.resolve().as_uri()+"?mode=ro",uri=True)
                     try:
-                        rows=reader.execute("SELECT id,utc,actor,kind,payload FROM events WHERE id>? AND (kind LIKE 'lab.%' OR kind LIKE 'math.%' OR kind LIKE 'formal.%' OR kind LIKE 'curriculum.%' OR kind LIKE 'language.%' OR kind LIKE 'thought.%' OR kind LIKE 'agent.%' OR kind LIKE 'dataset.%' OR kind LIKE 'auto.%' OR kind LIKE 'meta.live%') ORDER BY id LIMIT 50",(after,))
+                        rows=reader.execute("SELECT id,utc,actor,kind,payload FROM events WHERE id>? AND (kind LIKE 'lab.%' OR kind LIKE 'math.%' OR kind LIKE 'formal.%' OR kind LIKE 'curriculum.%' OR kind LIKE 'language.%' OR kind LIKE 'thought.%' OR kind LIKE 'agent.%' OR kind LIKE 'dataset.%' OR kind LIKE 'auto.%' OR kind LIKE 'meta.live%' OR kind LIKE 'online.%' OR kind LIKE 'benchmark.%' OR kind LIKE 'profiles.%' OR kind LIKE 'model.%') ORDER BY id LIMIT 50",(after,))
                         events=[dict(id=r[0],utc=r[1],actor=r[2],kind=r[3],payload=json.loads(r[4])) for r in rows]
                     finally: reader.close()
                     self._send(200,dict(events=events))
@@ -15381,7 +15451,9 @@ def _dataset_pair(value):
 def iter_agent_dataset(path):
     import csv
     path=Path(path);kind=path.suffix.lower()
-    if kind in ('.jsonl','.ndjson'):
+    if kind in ('.arrow','.feather','.parquet','.pq'):
+        for row in iter_columnar_records(path):yield _dataset_pair(row)
+    elif kind in ('.jsonl','.ndjson'):
         with path.open('rb') as file:
             while True:
                 raw=file.readline(16385)
@@ -15416,7 +15488,7 @@ def import_agent_data(lab,identity,path):
     if not isinstance(lab.backend,CompactEncoderDecoder):
         # Arquivo semântico alimenta recuperação; importar não altera pesos.
         source='local:'+str(path.resolve());records=0
-        if path.suffix.lower() in ('.jsonl','.ndjson','.json','.csv','.tsv'):
+        if path.suffix.lower() in ('.jsonl','.ndjson','.json','.csv','.tsv','.arrow','.feather','.parquet','.pq'):
             content=iter_agent_dataset(path);detail=dict(reader='structured_pairs_to_semantic_archive')
         else:
             document=extract_agent_document(path);text=document['text'];detail={k:v for k,v in document.items() if k!='text'}
@@ -15430,7 +15502,7 @@ def import_agent_data(lab,identity,path):
         result=dict(path=str(path.resolve()),records=records,detail=detail,weights_changed=False,evaluated=False,storage='local_semantic_archive',limitations='Texto disponível para recuperação; não é treino neural. Use /dataset para BPTT e avaliação.')
         lab.history.append('dataset.imported',identity,result);return result
     language=CompressedLanguageModel.load(agent.bridge.language().dump());language.enable_bpe();source='local:'+str(path.resolve());records=0
-    if path.suffix.lower() in ('.jsonl','.ndjson','.json','.csv','.tsv'):
+    if path.suffix.lower() in ('.jsonl','.ndjson','.json','.csv','.tsv','.arrow','.feather','.parquet','.pq'):
         for question,answer in iter_agent_dataset(path):
             language.learn(answer,source,question=question);records+=1
             if records>=256:break
@@ -15463,7 +15535,7 @@ def load_agent_dataset(path,*,limit=256,seed=81):
     pairs=list(unique.items())
     if len(pairs)<5:raise ValueError('Forneça pelo menos 5 perguntas/trechos distintos para avaliar; documentos menores podem ser lidos com /importar')
     order=rng.permutation(len(pairs));holdout=max(1,len(pairs)//5)
-    return dict(path=str(path.resolve()),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),lines=seen,sampled=len(pairs),source_format=path.suffix.lower(),task='supervised_pairs' if path.suffix.lower() in ('.jsonl','.ndjson','.json','.csv','.tsv') else 'document_continuation_not_verified_qa',train=[pairs[int(i)] for i in order[holdout:]],holdout=[pairs[int(i)] for i in order[:holdout]],sampling='reservatório limitado a 256 pares; split por pergunta, 20% reservado; não é benchmark independente')
+    return dict(path=str(path.resolve()),sha256=hashlib.sha256(path.read_bytes()).hexdigest(),lines=seen,sampled=len(pairs),source_format=path.suffix.lower(),task='supervised_pairs' if path.suffix.lower() in ('.jsonl','.ndjson','.json','.csv','.tsv','.arrow','.feather','.parquet','.pq') else 'document_continuation_not_verified_qa',train=[pairs[int(i)] for i in order[holdout:]],holdout=[pairs[int(i)] for i in order[:holdout]],sampling='reservatório limitado a 256 pares; split por pergunta, 20% reservado; não é benchmark independente')
 
 
 def dataset_measure(core,bridge,pairs):
@@ -15489,7 +15561,7 @@ def expanded_native_candidate(core,bridge):
 
 
 @lab_operation
-def train_agent_dataset(lab,identity,path,*,epochs=2,grow=False,seconds=30.):
+def train_agent_dataset(lab,identity,path,*,epochs=2,grow=False,seconds=30.,morphology='grow'):
     if type(epochs) is not int or not 1<=epochs<=10 or type(grow) is not bool or not isinstance(seconds,(float,int)) or not math.isfinite(seconds) or not 1<=seconds<=300:raise ValueError('Limites: epochs 1–10, seconds 1–300')
     lab._require_model();core=lab.backend;agent=lab._agent(identity);agent.ensure_bridge(core)
     if not isinstance(core,(NativeSeq2Seq,CompactEncoderDecoder)):raise ValueError('Dataset local usa núcleo NumPy ou compacto; não treina o backbone T5 congelado')
@@ -15499,19 +15571,19 @@ def train_agent_dataset(lab,identity,path,*,epochs=2,grow=False,seconds=30.):
     # Probe fixo é declarado e não representa retenção de todo o passado.
     if not retained:retained=[('Calcule 2 + 3. Só o número.','5'),('MDC de 6 e 9. Só o número.','3')]
     baseline=dataset_measure(core,agent.bridge,data['holdout']);retention=dataset_measure(core,agent.bridge,retained)
-    before={k:v.copy() for k,v in agent.bridge.arrays.items()};candidate_core,candidate=(expanded_native_candidate(core,agent.bridge) if grow else (core,core.new_bridge(0)))
+    before={k:v.copy() for k,v in agent.bridge.arrays.items()};candidate_core,candidate=((pruned_native_candidate(core,agent.bridge) if morphology=='prune' else expanded_native_candidate(core,agent.bridge)) if grow else (core,core.new_bridge(0)))
     if not grow:_restore_bridge(core,candidate,before)
     started=time.monotonic();deadline=started+seconds;updates=0;losses=[]
     lab.history.append('dataset.started',identity,dict(source={k:v for k,v in data.items() if k not in ('train','holdout')},epochs=epochs,grow=grow,holdout=data['holdout'],train=data['train'],retention=retained))
     for epoch in range(epochs):
         for question,answer in data['train']:
             if time.monotonic()>=deadline:break
-            report=candidate_core.teach(candidate_core.encode(question),candidate,np.zeros(48),answer,steps=1,rate=.1);updates+=1;losses.append(report['loss_after'])
+            report=tcp_train_pair(candidate_core,candidate,question,answer,np.zeros(48),[(q,a,np.zeros(48).tolist()) for q,a in retained[-4:]],constitution=lab.config.constitutional_projection,rate=.03) if isinstance(candidate_core,NativeSeq2Seq) and lab.config.online_learning else candidate_core.teach(candidate_core.encode(question),candidate,np.zeros(48),answer,steps=1,rate=.1);updates+=1;losses.append(report['loss_after'])
         if time.monotonic()>=deadline:break
     evaluated=dataset_measure(candidate_core,candidate,data['holdout']);retained_after=dataset_measure(candidate_core,candidate,retained)
     gain=baseline['loss']-evaluated['loss'];accepted=updates>0 and math.isfinite(evaluated['loss']) and gain>1e-6 and retained_after['loss']<=retention['loss']+.02
     report=dict(dataset={k:v for k,v in data.items() if k not in ('train','holdout')},baseline=baseline,after=evaluated,retention_before=retention,retention_after=retained_after,retention_tolerance=.02,gain=gain,updates=updates,accepted=accepted,elapsed_seconds=time.monotonic()-started,budget_seconds=seconds,training_loss=losses[-32:],
-        architecture=dict(parameters_before=sum(v.size for k,v in before.items() if k in ('E','A','D','C','O','b','B')),parameters_candidate=sum(v.size for k,v in candidate.arrays.items() if k in ('E','A','D','C','O','b','B')),before=getattr(core,'dimension',None),candidate=getattr(candidate_core,'dimension',None),changed=bool(grow and accepted),method='bounded RNN width expansion +8; empirical validation, not source rewriting' if grow else 'unchanged'),
+        architecture=dict(parameters_before=sum(v.size for k,v in before.items() if k in ('E','A','D','C','O','b','B')),parameters_candidate=sum(v.size for k,v in candidate.arrays.items() if k in ('E','A','D','C','O','b','B')),before=getattr(core,'dimension',None),candidate=getattr(candidate_core,'dimension',None),changed=bool(grow and accepted),method=('activation/weight-ranked coordinate pruning -8 with finite retention' if morphology=='prune' else 'bounded RNN width expansion +8; empirical validation, not source rewriting') if grow else 'unchanged'),
         limitations='Holdout local finito; comparar execuções repetidas contamina a avaliação. Não garante melhora geral nem ausência de esquecimento.',training_kind='BPTT_numpy' if isinstance(core,NativeSeq2Seq) else 'PPM_counts_and_local_bridge')
     report['parameter_delta_l2']=float(math.sqrt(sum(float(np.sum((candidate.arrays[k]-before[k])**2)) for k in ('E','A','D','C','O','b','B') if k in before and candidate.arrays[k].shape==before[k].shape)))
     report['parameter_delta_scope']='Same-shape floating parameters only; new dimensions reported separately, compressed counts excluded'
@@ -15552,7 +15624,7 @@ def parse_dataset_chat(message):
     if len(pieces)<2:raise ValueError('Use /dataset caminho.jsonl [--epochs 2] [--grow] [--seconds 30]')
     path=pieces[1];options=dict(epochs=2,grow=False,seconds=30.);i=2
     while i<len(pieces):
-        if pieces[i]=='--grow':options['grow']=True;i+=1
+        if pieces[i] in ('--grow','--prune'):options[pieces[i][2:]]=True;i+=1
         elif pieces[i] in ('--epochs','--seconds') and i+1<len(pieces):
             name=pieces[i][2:];options[name]=int(pieces[i+1]) if name=='epochs' else float(pieces[i+1]);i+=2
         else:raise ValueError('Opção de dataset desconhecida: '+pieces[i])
@@ -15702,8 +15774,9 @@ class AutoImprovementLoop:
             report=dict(round=number,curriculum=None,dataset=None,code=None,restart_required=False)
             report['curriculum']=self.lab.curriculum_step('NEURON-1',teacher=options.get('teacher',False),steps=1)
             if options.get('dataset') and not self.stop_event.is_set():
-                can_grow=options.get('grow',False) and self.lab.backend.dimension<64
-                report['dataset']=train_agent_dataset(self.lab,'NEURON-1',options['dataset'],epochs=1,grow=can_grow,seconds=3.)
+                can_prune=options.get('prune',False) and isinstance(self.lab.backend,NativeSeq2Seq) and self.lab.backend.dimension>8 and (not options.get('grow') or number%2==0)
+                can_grow=options.get('grow',False) and self.lab.backend.dimension<64 and not can_prune
+                report['dataset']=train_omni_dataset(self.lab,'NEURON-1',options['dataset'],epochs=1,grow=can_grow,prune=can_prune,seconds=3.)
             if options.get('code') and not self.stop_event.is_set():
                 editor=MetaProgrammer(Path(__file__),self.lab.directory/'auto-patches',self.lab.history);staged=editor.evolve();report['code']=dict(staged=staged,applied=False)
                 if staged.get('selected'):
@@ -15735,8 +15808,9 @@ def agent_auto_command(lab,message):
     options=dict(rounds=5,teacher=False,code=False,grow=False,dataset=None);index=2
     while index<len(pieces):
         word=pieces[index]
-        if word in ('--professor','--codigo','--grow'):options[{'--professor':'teacher','--codigo':'code','--grow':'grow'}[word]]=True;index+=1
-        elif word in ('--dataset','--rounds') and index+1<len(pieces):options['dataset' if word=='--dataset' else 'rounds']=pieces[index+1] if word=='--dataset' else int(pieces[index+1]);index+=2
+        if word in ('--professor','--codigo','--grow','--prune'):options[{'--professor':'teacher','--codigo':'code','--grow':'grow','--prune':'prune'}[word]]=True;index+=1
+        elif word in ('--dataset','--rounds','--benchmark','--benchmark-file','--benchmark-every','--interval') and index+1<len(pieces):
+            key=word[2:].replace('-','_');value=pieces[index+1];options[key]=int(value) if key in ('rounds','benchmark_every') else float(value) if key=='interval' else value;index+=2
         else:raise ValueError('Opção auto desconhecida: '+word)
     manager.start(**options)
     return 'Ciclo opt-in iniciado em pausas. Dados verificados e candidatos são avaliados; propostas podem ser rejeitadas. '+('Código: somente adaptive_kernel, com prova racional, benchmark, regressão, backup e ativação quente sem reinício.' if options['code'] else 'Alteração de código-fonte desativada.')
@@ -15811,6 +15885,12 @@ def agent_intent_dispatch(lab,identity,user_prompt):
     if not isinstance(user_prompt,str) or not user_prompt.strip() or len(user_prompt)>4000:raise ValueError('Mensagem deve conter 1–4000 caracteres')
     prompt=user_prompt.strip();text=_agent_normalize(prompt);agent=lab._agent(identity);route='dialogue';used_reply=False;event=None;receipt=None;deep=False
     lab.history.append('agent.input',identity,dict(text=prompt))
+    natural=nine_natural_command(prompt)
+    if natural:
+        result=nine_chat_command(lab,natural)
+        if result is not None:
+            if not isinstance(result,str):raise ValueError('Troca de perfil disponível no console interativo')
+            lab.history.append('agent.response',identity,dict(input=prompt,text=result,route='omni_command'));return result
     if re.fullmatch(r'(?:por favor,? )?(?:liste (?:os )?arquivos(?: da pasta)?(?: para eu ver uma coisa)?|quais arquivos(?: (?:ha|tem) na pasta)?|o que tem na pasta)',text):
         route='files.list';result=lab.seed_action(dict(action='tool_goal',agent=identity,goal='/tool {"tool":"files.list","args":{}}'))
         listing=result['results'][0]['result'];entries=listing['entries'];names=[e['name']+('/' if e['directory'] else '') for e in entries]
@@ -15844,6 +15924,8 @@ def agent_intent_dispatch(lab,identity,user_prompt):
         else:
             event=lab.reply(identity,prompt);used_reply=True;answer=humanize_response(event)
             if deep:answer+='\n\nO modo compacto não usa recorrência latente neural; nenhum ciclo de pensamento extra foi executado.'
+    if used_reply and (event or {}).get('online_training',{}).get('enabled'):
+        training=event['online_training'];answer+='\nAprendizado online: '+('atualização aceita' if training.get('accepted') else 'passo vetado')+'; Δ L2 dos pesos = '+format(training.get('delta_l2',0.),'.6g')+'.'
     reasoning=agent_reasoning_report(lab,route,event,receipt,deep=deep)
     if lab.config.reasoning_visible:
         level={'medio':'médio','maximo':'máximo','muito_alto':'muito alto'}.get(reasoning['effort'],reasoning['effort'])
@@ -15856,11 +15938,13 @@ def agent_intent_dispatch(lab,identity,user_prompt):
     return answer
 
 
-def run_autonomous_agent(directory,config):
+def run_autonomous_agent(directory,config,*,profiles_root=None,offline=True):
     print('\nIniciando NEURON local...',end='',flush=True);open_menu=False
     with NeuronLaboratory(directory,config) as lab:
+        original_lab=lab;hub=NeuronProfiles(profiles_root or Path(directory).parent/'perfis');hub.attach('atual',lab)
         try:
-            lab.load_model(offline=True)
+            lab.load_model(offline=offline)
+            if lab._legacy_online_config:set_neuron_mode(lab,config.evolution_mode,online=config.online_learning)
             print(' pronto!\n')
             print('NEURON > Olá! Posso conversar a partir das minhas fontes locais, calcular\nmatemática e verificar equivalências polinomiais. As ferramentas respeitam\na pasta autorizada e as permissões configuradas.')
             print("Digite /menu para o laboratório, /ajuda para comandos, /esforco alto para esforço ou sair para encerrar.\n")
@@ -15871,7 +15955,11 @@ def run_autonomous_agent(directory,config):
                 if message.lower() in ('sair','exit','quit','/sair'):break
                 if message.lower()=='/menu':open_menu=True;break
                 try:
-                    if message.startswith('/esforco ') or message.startswith('/esforço '):
+                    omni=nine_chat_command(lab,nine_natural_command(message) or message)
+                    if omni is not None:
+                        if isinstance(omni,dict) and 'switch_profile' in omni:lab=omni['switch_profile'];answer='Perfil ativo: '+omni['name']+'.'
+                        else:answer=omni
+                    elif message.startswith('/esforco ') or message.startswith('/esforço '):
                         parts=message.split()[1:]
                         if parts[0]=='personalizado' and len(parts) in (2,3):result=set_agent_reasoning(lab,effort='personalizado',budget=int(parts[1]),seconds=float(parts[2]) if len(parts)==3 else None)
                         else:result=set_agent_reasoning(lab,effort=message.split(maxsplit=1)[1])
@@ -15890,7 +15978,7 @@ def run_autonomous_agent(directory,config):
                     elif message.startswith('/dataset'):
                         path,options=parse_dataset_chat(message);answer=dataset_human_report(train_agent_dataset(lab,'NEURON-1',path,**options))
                     elif message=='/ajuda':
-                        answer='Experimente: “Pode fatorar o número 600851475143 pra mim?”, “prove que (a+b)**2 é equivalente a a**2+2*a*b+b**2”, “liste os arquivos” ou “abra o painel”. Auto-melhoria opt-in: /auto iniciar --professor [--dataset arquivo --grow] [--codigo]; /auto estado ou /auto parar. Importação: /importar arquivo.pdf (também DOCX, XLSX, JSON, CSV, texto). Datasets: /dataset caminho.jsonl --epochs 2 [--grow, somente NumPy]. Esforço: /esforco baixo|medio|alto|muito_alto|maximo, /esforco 96 ou /esforco + (até 256). Explicação: /raciocinio ligar|desligar. Ensino: /ensinar pergunta => resposta. /bom e /ruim registram feedback.'
+                        answer='NEURON 9: /aprender ligar|desligar; /modo restrito|irrestrito; /modelo google/flan-t5-base; /hf owner/dataset --limit 256; /benchmark gsm8k; /arena; /perfil criar|usar|listar; /conversar alice bob tema. Experimente: “Pode fatorar o número 600851475143 pra mim?”, “prove que (a+b)**2 é equivalente a a**2+2*a*b+b**2”, “liste os arquivos” ou “abra o painel”. Auto-melhoria opt-in: /auto iniciar --professor [--dataset arquivo --grow] [--codigo]; /auto estado ou /auto parar. Importação: /importar arquivo.pdf (também DOCX, XLSX, JSON, CSV, texto). Datasets: /dataset caminho.jsonl --epochs 2 [--grow, somente NumPy]. Esforço: /esforco baixo|medio|alto|muito_alto|maximo, /esforco 96 ou /esforco + (até 256). Explicação: /raciocinio ligar|desligar. Ensino: /ensinar pergunta => resposta. /bom e /ruim registram feedback.'
                     elif message.startswith('/ensinar '):
                         pair=message[len('/ensinar '):].split('=>',1)
                         if len(pair)!=2:raise ValueError('Use /ensinar pergunta => resposta')
@@ -15907,7 +15995,7 @@ def run_autonomous_agent(directory,config):
             lab.curriculum.stop()
             observatory=getattr(lab,'agent_observatory',None)
             if observatory is not None:observatory.close();lab.agent_observatory=None
-            lab.checkpoint()
+            lab.checkpoint();hub.close()
             print('Sessão salva. Até logo!')
     if open_menu:return neuron_menu()
     return 0
@@ -16122,6 +16210,826 @@ class AgentBootTests(unittest.TestCase):
             self.assertTrue(lab.semantic_memory.search('NEURON-1','lavanda senha'))
 
 
+# NEURON 9: contratos de treino explícitos. TCP é proteção de primeira ordem.
+@lab_operation
+def set_neuron_mode(lab,mode,*,online=None):
+    if mode not in ('restrito','irrestrito'):raise ValueError('Modo: restrito ou irrestrito')
+    changes=dict(evolution_mode=mode,constitutional_projection=mode=='restrito')
+    if online is not None:
+        if type(online) is not bool:raise ValueError('online deve ser booleano')
+        changes['online_learning']=online
+    lab.config=dataclasses.replace(lab.config,**changes)
+    if lab.backend is not None:
+        lab.backend.config=lab.config
+        if isinstance(lab.backend,NativeSeq2Seq):lab.backend.signature=lab.backend.compatibility_signature();lab.expected_signature=lab.backend.signature
+    for agent in lab.agents:
+        agent.config=lab.config
+        models=[agent.task,agent.quality,agent.formal_router,*agent.unit.world_model.models,agent.unit.world_model.slow]
+        agent.unit.config=dataclasses.replace(agent.unit.config,constitutional_projection=mode=='restrito')
+        for model in models:
+            model.config=dataclasses.replace(model.config,constitutional_projection=mode=='restrito');model.optimizer.cfg=model.config
+
+    result=dict(mode=mode,online_learning=lab.config.online_learning,constitution=lab.config.constitutional_projection,tools='Permissões de arquivos, comandos, rede e desktop não são ampliadas',limitation='TCP local não garante ausência de esquecimento; projeção constitucional não prova alinhamento semântico')
+    lab.history.append('online.mode','lab',result);return result
+
+
+def bridge_loss_grad(core,encoded,bridge,context,answer):
+    if isinstance(core,NativeSeq2Seq):return core.loss_grad(encoded,bridge,context,answer)
+    if not isinstance(core,EncoderDecoderCore):raise ValueError('Gradientes disponíveis para RNN NumPy ou ponte Torch Seq2Seq')
+    with core._lock:
+        bridge.zero_grad(set_to_none=True)
+        labels=core.tokenizer(answer,return_tensors='pt',truncation=True,max_length=core.config.output_tokens)['input_ids'].to(core.config.device)
+        conditioned,mask=core._condition(encoded,bridge,context)
+        loss=core.model(encoder_outputs=conditioned,attention_mask=mask,labels=labels,use_cache=False,return_dict=True).loss
+        if not core.torch.isfinite(loss):raise FloatingPointError('Perda não finita')
+        loss.backward();grad={k:(p.grad.detach().cpu().double().numpy().copy() if p.grad is not None else np.zeros(tuple(p.shape))) for k,p in bridge.named_parameters()};value=float(loss.detach());bridge.zero_grad(set_to_none=True)
+        return value,grad
+
+
+def bridge_parameters(core,bridge):
+    if isinstance(core,NativeSeq2Seq):return {k:v.copy() for k,v in bridge.arrays.items() if k!='updates'}
+    return {k:p.detach().cpu().numpy().copy() for k,p in bridge.named_parameters()}
+
+
+def write_bridge_parameters(core,bridge,values):
+    if isinstance(core,NativeSeq2Seq):
+        for k,v in values.items():bridge.arrays[k][...]=v
+    else:
+        with core.torch.no_grad():
+            for k,p in bridge.named_parameters():p.copy_(core.torch.as_tensor(values[k],device=p.device,dtype=p.dtype))
+
+
+def tcp_train_pair(core,bridge,question,answer,context,memories=(),*,constitution=False,rate=.01):
+    """SGD negativo -> cone Gd<=0 -> checagem do passo real -> retenção finita."""
+    context=_vector(context,48,'context');before=bridge_parameters(core,bridge);loss,grad=bridge_loss_grad(core,core.encode(question),bridge,context,answer)
+    grad={k:v for k,v in grad.items() if k in before};norm=math.sqrt(sum(float(np.sum(v*v)) for v in grad.values()));delta={k:-rate*v/max(1.,norm) for k,v in grad.items()}
+    references=[];old_losses=[];probes=list(memories)[:4]
+    for q,a,c in probes:
+        old,g=bridge_loss_grad(core,core.encode(q),bridge,np.asarray(c),a);old_losses.append(old);references.append({k:g[k] for k in before})
+    if constitution:step,diagnostics=constitutional_transport(delta,memories=references)
+    else:
+        diagnostics={};step,_=transport_displacement(delta,references,{k:np.zeros_like(v) for k,v in before.items()},sweeps=128,diagnostics=diagnostics)
+    candidate={k:np.asarray(before[k]+step[k],dtype=before[k].dtype) for k in before};effective={k:candidate[k]-before[k] for k in before}
+    violation=max([tree_dot(effective,g) for g in references]+[0.]);c_violation=0.
+    if constitution:
+        rows,keys,_=constitutional_rows(before);flat=np.concatenate([effective[k].ravel() for k in keys]);c_violation=max(abs(float(r@flat)) for r in rows)
+    fallback=violation>1e-8 or c_violation>1e-8 or not all(np.isfinite(v).all() for v in candidate.values())
+    accepted=False
+    try:
+        if not fallback:write_bridge_parameters(core,bridge,candidate)
+        after=bridge_loss_grad(core,core.encode(question),bridge,context,answer)[0]
+        retained=[bridge_loss_grad(core,core.encode(q),bridge,np.asarray(c),a)[0] for q,a,c in probes]
+        accepted=not fallback and math.isfinite(after) and after<=loss+1e-7 and all(new<=old+.02 for old,new in zip(old_losses,retained))
+        if not accepted:write_bridge_parameters(core,bridge,before)
+    except BaseException:write_bridge_parameters(core,bridge,before);raise
+    actual=bridge_parameters(core,bridge);distance=math.sqrt(sum(float(np.sum((actual[k]-before[k])**2)) for k in before))
+    if accepted and isinstance(core,NativeSeq2Seq):bridge.arrays['updates']+=1
+    return dict(accepted=accepted,loss_before=loss,loss_after=after,delta_l2=distance,replay_constraints=len(references),max_memory_dot=violation,constitutional_violation=c_violation,retention_before=old_losses,retention_after=retained,fallback=fallback or diagnostics.get('fallback',False),backbone_updated=isinstance(core,NativeSeq2Seq),scope='Full individual NumPy RNN or trainable Torch bridge; not frozen pretrained backbone',guarantee='First-order cone plus finite retention probes only')
+
+
+def on_user_interaction_turn(lab,identity,user_prompt,event):
+    agent=lab._agent(identity);core=lab.backend;agent.ensure_bridge(core)
+    if not lab.config.online_learning:return dict(enabled=False)
+    # Aprende texto do usuário por reconstrução; não promove saída própria a fato.
+    target=user_prompt[:min(2000,lab.config.output_tokens-1)] or ' '
+    corrupted='Reconstrua: '+''.join('_' if i%5==0 else c for i,c in enumerate(target));receipt=event.get('formal_result')
+    if receipt and receipt.get('verification',{}).get('verified'):
+        target=_math_display(receipt['result'],min(120,lab.config.output_tokens-1));corrupted=user_prompt;source='verified_math'
+    else:source='user_text_reconstruction_unverified'
+    context=agent.last_context.copy();rate=.015 if lab.config.evolution_mode=='restrito' else .05
+    if isinstance(core,CompactEncoderDecoder):
+        before=agent.bridge.arrays['B'].copy();report=core.teach(core.encode(corrupted),agent.bridge,context,target,steps=1,rate=rate)
+        report.update(accepted=True,delta_l2=float(np.linalg.norm(agent.bridge.arrays['B']-before)),backbone_updated=False,scope='Compact HDC conditioning B plus PPM counts; not a pretrained language network')
+    else:
+        replay=list(agent.online_replay)[-(4 if lab.config.evolution_mode=='restrito' else 1):]
+        report=tcp_train_pair(core,agent.bridge,corrupted,target,context,replay,constitution=lab.config.constitutional_projection,rate=rate)
+        agent.online_replay.append((corrupted,target,context.tolist()))
+    report.update(enabled=True,source=source,mode=lab.config.evolution_mode)
+    lab.history.append('online.update',identity,dict(input=user_prompt,training=report));agent.last_online=report
+    return report
+
+
+def seq2seq_loss(core,bridge,q,a):
+    return bridge_loss_grad(core,core.encode(q),bridge,np.zeros(48),a)[0]
+
+
+@lab_operation
+def swap_encoder_decoder(lab,model,*,offline=False,revision='main',candidate_core=None):
+    """Carga y evaluación antes de sustituir. La migración no preserva semántica."""
+    if getattr(lab,'auto_improvement',None) and lab.auto_improvement.status()['running']:raise ValueError('Pause /auto antes de trocar o backbone')
+    old=lab.backend;lab._require_model();config=dataclasses.replace(lab.config,model=model,revision=revision)
+    core=candidate_core
+    if core is None:
+        if model.startswith('numpy:'):core=NativeSeq2Seq(config) if model=='numpy:tiny' else NativeSeq2Seq.load(config,model[6:])
+        elif model.startswith('compact:'):core=CompactEncoderDecoder(config)
+        else:core=EncoderDecoderCore(config,offline=offline)
+    core.config=config;bridges=[];reports=[]
+    for agent in lab.agents:
+        agent.ensure_bridge(old);new=core.new_bridge(lab.config.seed+agent.index)
+        if isinstance(old,EncoderDecoderCore) and isinstance(core,EncoderDecoderCore):
+            migrate_seq2seq_bridge(old,agent.bridge,core,new)
+        elif isinstance(old,NativeSeq2Seq) and isinstance(core,NativeSeq2Seq) and old.dimension==core.dimension:
+            if old.signature==core.signature:_restore_bridge(core,new,_bridge_arrays(agent.bridge))
+            else:new.arrays['B']=agent.bridge.arrays['B'].copy()
+        probes=[(m['question'],m['answer']) for m in agent.memories if m.get('kind')=='teaching'][-4:]
+        comparison=[]
+        if probes and not isinstance(old,CompactEncoderDecoder) and not isinstance(core,CompactEncoderDecoder):
+            for q,a in probes:comparison.append(dict(before=seq2seq_loss(old,agent.bridge,q,a),after=seq2seq_loss(core,new,q,a)))
+            if any(p['after']>p['before']+.2 for p in comparison):raise ValueError('Migração rejeitada pelo gate de retenção; backbone anterior permanece ativo')
+        bridges.append(new);reports.append(dict(agent=agent.identity,probes=comparison))
+    snapshot=lab._save_bytes();backup=lab.directory/'models'/('before-swap-'+hashlib.sha256(snapshot).hexdigest()+'.lab');backup.parent.mkdir(exist_ok=True);backup.write_bytes(snapshot);old_bridges=[a.bridge for a in lab.agents]
+    try:
+        lab.config=config;lab.backend=core;lab.expected_signature=core.signature
+        for agent,bridge in zip(lab.agents,bridges):agent.config=config;agent.bridge=bridge;agent.saved_bridge=None;agent.last_transformer=None;agent.online_replay.clear()
+        lab.checkpoint()
+    except BaseException:
+        lab.backend=old;lab._load_bytes(snapshot)
+        for agent,bridge in zip(lab.agents,old_bridges):agent.bridge=bridge
+        raise
+    result=dict(backup=str(backup),model=model,revision=revision,dimension=core.dimension,migration='Orthogonal dimension projection + low-rank SVD for Torch bridges; cross-family bridge reset; no semantic equivalence',retention=reports,backbone_frozen=isinstance(core,EncoderDecoderCore),restart_required=False)
+    lab.history.append('model.swapped','lab',result);return result
+
+def migrate_seq2seq_bridge(old_core,old_bridge,new_core,new_bridge):
+    original=_bridge_arrays(old_bridge);destination=_bridge_arrays(new_bridge);old_dim=old_core.dimension;new_dim=new_core.dimension
+    rng=np.random.default_rng(9009+old_dim+new_dim)
+    if old_dim==new_dim:projection=np.eye(old_dim)
+    else:
+        q,_=np.linalg.qr(rng.normal(size=(max(old_dim,new_dim),min(old_dim,new_dim))));projection=q if new_dim>=old_dim else q.T
+    left=projection@original['up.weight'];right=original['down.weight']@projection.T
+    ql,rl=np.linalg.qr(left,mode='reduced');qr,rr=np.linalg.qr(right.T,mode='reduced');u,s,v=np.linalg.svd(rl@rr.T,full_matrices=False)
+    rank=min(destination['down.weight'].shape[0],len(s));up=np.zeros_like(destination['up.weight']);down=destination['down.weight'].copy();up[:,:rank]=(ql@u[:,:rank])*np.sqrt(s[:rank]);down[:rank]=np.sqrt(s[:rank])[:,None]*(v[:rank]@qr.T)
+    destination['up.weight']=up;destination['down.weight']=down
+    destination['state.weight']=np.einsum('ij,pjk->pik',projection,original['state.weight'].reshape(2,old_dim,48)).reshape(2*new_dim,48).astype(destination['state.weight'].dtype)
+    destination['state.bias']=np.einsum('ij,pj->pi',projection,original['state.bias'].reshape(2,old_dim)).reshape(2*new_dim).astype(destination['state.bias'].dtype)
+    _restore_bridge(new_core,new_bridge,destination)
+
+def teach_with_tcp(lab,agent,question,answer,context,steps):
+    core=lab.backend;before=bridge_parameters(core,agent.bridge);memories=[(m['question'],m['answer'],np.zeros(48).tolist()) for m in agent.memories if m.get('kind')=='teaching'][-4:];reports=[]
+    for _ in range(steps):reports.append(tcp_train_pair(core,agent.bridge,question,answer,context,memories,constitution=lab.config.constitutional_projection,rate=.03))
+    final=bridge_parameters(core,agent.bridge);result=dict(reports[-1]);result.update(loss_before=reports[0]['loss_before'],steps=steps,accepted=any(r['accepted'] for r in reports),delta_l2=math.sqrt(sum(float(np.sum((final[k]-before[k])**2)) for k in before)),trainable='individual_numpy_rnn' if isinstance(core,NativeSeq2Seq) else 'individual_torch_bridge')
+    return result
+
+def pruned_native_candidate(core,bridge):
+    if core.dimension<=8:raise ValueError('Poda mínima: dimensão 8')
+    size=max(8,core.dimension-8);tensors=core.last_tensors
+    if isinstance(tensors,dict) and np.asarray(tensors.get('decoder_hidden',[])).ndim==2 and tensors['decoder_hidden'].shape[1]==core.dimension:usage=np.mean(np.abs(tensors['decoder_hidden']),axis=0)
+    else:usage=np.linalg.norm(bridge.arrays['O'],axis=0)+np.linalg.norm(bridge.arrays['D'],axis=0)
+    keep=np.sort(np.argsort(-usage,kind='stable')[:size]);candidate=NativeSeq2Seq(core.config,dimension=size);new=candidate.new_bridge(0)
+    for key,array in bridge.arrays.items():
+        if key in ('A','D','C'):new.arrays[key]=array[np.ix_(keep,keep)].copy()
+        elif key in ('E','O'):new.arrays[key]=array[:,keep].copy()
+        elif key=='B':new.arrays[key]=array[keep].copy()
+        else:new.arrays[key]=array.copy()
+    return candidate,new
+
+
+NINE_DATA_FORMATS=('.arrow','.feather','.parquet','.pq')
+
+
+def iter_columnar_records(path):
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        import pyarrow.ipc as ipc
+        import pyarrow.feather as feather
+    except ImportError as error:raise RuntimeError('Arrow/Parquet requer pyarrow opcional: python -m pip install pyarrow; não requer datasets') from error
+    path=Path(path)
+    if path.stat().st_size>128*1024*1024:raise ValueError('Arquivo colunar excede 128 MiB por shard')
+    if path.suffix.lower() in ('.parquet','.pq'):batches=pq.ParquetFile(path).iter_batches(batch_size=64)
+    elif path.suffix.lower()=='.feather':
+        memory=pa.memory_map(str(path),'r');reader=ipc.open_file(memory);batches=(reader.get_batch(i) for i in range(reader.num_record_batches))
+    else:
+        memory=pa.memory_map(str(path),'r')
+        try:
+            reader=ipc.open_file(memory);batches=(reader.get_batch(i) for i in range(reader.num_record_batches))
+        except pa.ArrowInvalid:
+            memory.seek(0);reader=ipc.open_stream(memory);batches=iter(reader)
+    try:
+        for batch in batches:
+            if batch.nbytes>32*1024*1024:raise ValueError('RecordBatch expandido excede 32 MiB')
+            for row in batch.to_pylist():yield row
+    finally:
+        if 'memory' in locals():memory.close()
+
+
+DATASET_NETWORK_HOSTS=('huggingface.co','datasets-server.huggingface.co','cdn-lfs.huggingface.co','cdn-lfs-us-1.huggingface.co','cdn-lfs-eu-1.huggingface.co','cas-bridge.xethub.hf.co','us.aws.cdn.hf.co','raw.githubusercontent.com')
+
+
+def dataset_http_get(url,*,max_bytes=8*1024*1024):
+    import urllib.request
+    from urllib.parse import urlsplit
+    def validate(target):
+        parsed=urlsplit(target)
+        if parsed.scheme!='https' or parsed.hostname not in DATASET_NETWORK_HOSTS or parsed.port not in (None,443) or parsed.username or parsed.password:raise ValueError('Destino de datasets não permitido')
+    validate(url)
+    class Redirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self,request,fp,code,msg,headers,newurl):validate(newurl);return super().redirect_request(request,fp,code,msg,headers,newurl)
+    opener=urllib.request.build_opener(Redirect())
+    with opener.open(urllib.request.Request(url,headers={'User-Agent':'NEURON/9 dataset-client'}),timeout=20) as response:
+        chunks=[];size=0
+        while True:
+            piece=response.read(min(65536,max_bytes-size+1))
+            if not piece:break
+            size+=len(piece)
+            if size>max_bytes:raise ValueError('Resposta excede orçamento de download')
+            chunks.append(piece)
+        return b''.join(chunks)
+
+
+def download_hf_dataset(directory,repo,*,config=None,split='train',limit=256,revision='main',filename=None):
+    """Paginação /rows ou shard explícito; limites, SHA-256 e procedência durável."""
+    from urllib.parse import urlencode,quote
+    if not isinstance(repo,str) or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo):raise ValueError('Repo deve ser owner/dataset')
+    if type(limit) is not int or not 1<=limit<=10000:raise ValueError('Limite de registros 1–10000')
+    if not isinstance(split,str) or not re.fullmatch(r'[A-Za-z0-9_.-]{1,80}',split):raise ValueError('Split inválido')
+    if not isinstance(revision,str) or not re.fullmatch(r'[A-Za-z0-9_./-]{1,120}',revision) or '..' in revision:raise ValueError('Revisão inválida')
+    root=Path(directory)/'downloads';root.mkdir(parents=True,exist_ok=True)
+    if filename:
+        if not isinstance(filename,str) or '..' in Path(filename).parts or filename.startswith('/') or Path(filename).suffix.lower() not in (*DATA_FORMATS,*NINE_DATA_FORMATS):raise ValueError('Nome de shard inválido')
+        url='https://huggingface.co/datasets/'+repo+'/resolve/'+quote(revision,safe='')+'/'+quote(filename,safe='/');raw=dataset_http_get(url,max_bytes=32*1024*1024);digest=hashlib.sha256(raw).hexdigest();path=root/(digest+Path(filename).suffix.lower());rows=None
+    else:
+        if revision!='main':raise ValueError('/rows não fixa revisão; use --file para shard em revisão explícita')
+        splits_url='https://datasets-server.huggingface.co/splits?'+urlencode(dict(dataset=repo));metadata=json.loads(dataset_http_get(splits_url))
+        choices=[s for s in metadata.get('splits',[]) if s.get('split')==split and (config is None or s.get('config')==config)]
+        if not choices:raise ValueError('Config/split não encontrado no dataset')
+        selected=sorted(choices,key=lambda s:(s.get('config')!='default',s.get('config','')))[0];config=selected['config'];rows=[];bytes_used=0
+        for offset in range(0,limit,100):
+            url='https://datasets-server.huggingface.co/rows?'+urlencode(dict(dataset=repo,config=config,split=split,offset=offset,length=min(100,limit-offset)))
+            payload=dataset_http_get(url,max_bytes=min(8*1024*1024,32*1024*1024-bytes_used));bytes_used+=len(payload);page=json.loads(payload)
+            entries=page.get('rows',[])
+            if not entries:break
+            for entry in entries:
+                if entry.get('truncated_cells'):raise ValueError('Servidor truncou células; use um shard com --file')
+                rows.append(entry['row'])
+            if len(entries)<min(100,limit-offset):break
+        raw=''.join(json.dumps(row,ensure_ascii=False)+'\n' for row in rows).encode();digest=hashlib.sha256(raw).hexdigest();path=root/(digest+'.jsonl')
+    if not raw:raise ValueError('Download vazio')
+    handle,temp=tempfile.mkstemp(dir=root,prefix='.dataset-')
+    try:
+        with os.fdopen(handle,'wb') as file:file.write(raw);file.flush();os.fsync(file.fileno())
+        os.replace(temp,path)
+    finally:
+        if os.path.exists(temp):os.unlink(temp)
+    manifest=dict(repo=repo,config=config,split=split,revision=revision,revision_pinned=bool(filename and re.fullmatch('[a-f0-9]{40}',revision)),file=filename,path=str(path.resolve()),sha256=digest,bytes=len(raw),records=None if rows is None else len(rows),utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),server='HF rows API' if rows is not None else 'HF explicit shard',warning='rows API is a live snapshot; checksum identifies exact local evaluation bytes; no repository Python is executed')
+    path.with_suffix(path.suffix+'.manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2));return manifest
+
+
+@lab_operation
+def ingest_hf_dataset(lab,identity,repo,*,train=True,**options):
+    manifest=download_hf_dataset(lab.directory,repo,**options);lab.history.append('dataset.hf_downloaded',identity,manifest)
+    path=Path(manifest['path'])
+    if train:result=train_omni_dataset(lab,identity,path,epochs=1,seconds=20.)
+    else:result=dict(download_only=True,accepted=False,weights_changed=False)
+    return dict(download=manifest,learning=result)
+
+
+@lab_operation
+def train_omni_dataset(lab,identity,path,*,epochs=2,grow=False,seconds=30.,prune=False):
+    core=lab.backend;lab._require_model()
+    if prune:
+        if grow or not isinstance(core,NativeSeq2Seq):raise ValueError('Escolha grow ou prune, apenas para RNN NumPy')
+        return train_agent_dataset(lab,identity,path,epochs=epochs,grow=True,seconds=seconds,morphology='prune')
+    if isinstance(core,CompactEncoderDecoder) or grow:return train_agent_dataset(lab,identity,path,epochs=epochs,grow=grow,seconds=seconds)
+    if type(epochs) is not int or not 1<=epochs<=10 or not 1<=seconds<=300:raise ValueError('Limites de treino inválidos')
+    data=load_agent_dataset(path);agent=lab._agent(identity);agent.ensure_bridge(core);candidate=core.new_bridge(lab.config.seed+agent.index);_restore_bridge(core,candidate,_bridge_arrays(agent.bridge))
+    probes=[(m['question'],m['answer'],np.zeros(48).tolist()) for m in agent.memories if m.get('kind')=='teaching'][-4:]
+    def measure(bridge,pairs):return float(np.mean([seq2seq_loss(core,bridge,q,a) for q,a in pairs]))
+    before=measure(agent.bridge,data['holdout']);old_retention=measure(agent.bridge,[(q,a) for q,a,c in probes]) if probes else None;started=time.monotonic();updates=0
+    for epoch in range(epochs):
+        for q,a in data['train']:
+            if time.monotonic()-started>=seconds:break
+            report=tcp_train_pair(core,candidate,q,a,np.zeros(48),probes,constitution=lab.config.constitutional_projection,rate=.03);updates+=int(report['accepted'])
+        if time.monotonic()-started>=seconds:break
+    after=measure(candidate,data['holdout']);new_retention=measure(candidate,[(q,a) for q,a,c in probes]) if probes else None;accepted=updates>0 and after<before-1e-6 and (old_retention is None or new_retention<=old_retention+.02)
+    if accepted:
+        _restore_bridge(core,agent.bridge,_bridge_arrays(candidate));agent.teachings+=updates
+        for q,a in data['train'][-16:]:agent.memories.append(dict(question=q,answer=a,features=core.encode(q)['features'].tolist(),kind='teaching'))
+    result=dict(accepted=accepted,updates=updates,holdout_before=before,holdout_after=after,retention_before=old_retention,retention_after=new_retention,model=core.identity,metric='token_negative_log_likelihood',data={k:v for k,v in data.items() if k not in ('train','holdout')},backbone_updated=isinstance(core,NativeSeq2Seq),elapsed_seconds=time.monotonic()-started)
+    lab.history.append('dataset.omni_evaluated',identity,result);return result
+
+
+BENCHMARK_SPECS={'gsm8k':dict(repo='openai/gsm8k',config='main',split='test',metric='numeric_exact_match'),'mmlu':dict(repo='cais/mmlu',config='all',split='test',metric='conditional_choice_accuracy'),'arc':dict(repo='allenai/ai2_arc',config='ARC-Challenge',split='test',metric='conditional_choice_accuracy'),'humaneval':dict(repo='openai/openai_humaneval',config='openai_humaneval',split='test',metric='completion_export_only_not_pass_at_1')}
+
+
+def iter_benchmark_rows(path):
+    path=Path(path)
+    if path.suffix.lower() in NINE_DATA_FORMATS:yield from iter_columnar_records(path)
+    elif path.suffix.lower()=='.json':
+        value=json.loads(path.read_text());yield from value.get('data',[]) if isinstance(value,dict) else value
+    else:
+        with path.open() as file:
+            for line in file:
+                if len(line)>65536:raise ValueError('Linha de benchmark excede 64 KiB')
+                if line.strip():yield json.loads(line)
+
+
+def canonical_numeric_answer(text):
+    text=str(text).replace(',','');tail=text.split('####')[-1]
+    values=re.findall(r'[-+]?\d+(?:\.\d+)?(?:/\d+)?',tail)
+    if not values:return None
+    try:return str(Fraction(values[-1]))
+    except (ValueError,ZeroDivisionError):return None
+
+
+def benchmark_choice(row):
+    question=row.get('question');choices=row.get('choices');answer=row.get('answer',row.get('answerKey'))
+    if isinstance(question,dict):choices=question.get('choices',choices);question=question.get('stem')
+    if isinstance(choices,dict):labels=choices.get('label') or [chr(65+i) for i in range(len(choices['text']))];texts=choices['text']
+    elif isinstance(choices,list) and choices and isinstance(choices[0],dict):labels=[str(x['label']) for x in choices];texts=[x['text'] for x in choices]
+    elif isinstance(choices,list):texts=choices;labels=[chr(65+i) for i in range(len(texts))]
+    else:raise ValueError('Choices ausentes ou inválidas')
+    if not isinstance(question,str) or not 2<=len(texts)<=8 or any(not isinstance(x,str) for x in texts):raise ValueError('Questão de múltipla escolha inválida')
+    if type(answer) is int:
+        if not 0<=answer<len(labels):raise ValueError('Índice de resposta inválido')
+        correct=labels[answer]
+    else:
+        correct=str(answer)
+        if correct not in labels:raise ValueError('Resposta correta fora das opções')
+    prompt=question+'\n'+'\n'.join(label+'. '+text for label,text in zip(labels,texts))+'\nAnswer with the option label only:'
+    return prompt,labels,correct
+
+
+def score_choice(core,bridge,prompt,label):
+    if isinstance(core,CompactEncoderDecoder):raise ValueError('Benchmark por log-verossimilhança exige núcleo neural; compacto não tem logits condicionais equivalentes')
+    loss=seq2seq_loss(core,bridge,prompt,label)
+    count=len(core.tokens(label,max(1,core.config.output_tokens-1)))+1 if isinstance(core,NativeSeq2Seq) else len(core.tokenizer(label)['input_ids'])
+    return -loss*max(1,count)
+
+
+@lab_operation
+def run_arena_benchmark(lab,identity,name,*,path=None,limit=50,seconds=120.,seed=9):
+    if name not in BENCHMARK_SPECS or type(limit) is not int or not 1<=limit<=1000 or not 1<=seconds<=600:raise ValueError('Benchmark/limites inválidos: gsm8k, mmlu, arc, humaneval; 1–1000 questões, 1–600 s')
+    lab._require_model();agent=lab._agent(identity);agent.ensure_bridge(lab.backend);spec=BENCHMARK_SPECS[name]
+    if path is None:
+        if name=='gsm8k':
+            url='https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl';raw=dataset_http_get(url,max_bytes=8*1024*1024);root=lab.directory/'benchmarks';root.mkdir(exist_ok=True);path=root/(hashlib.sha256(raw).hexdigest()+'.jsonl');path.write_bytes(raw);origin=dict(url=url,split='test',source='canonical_project_repository')
+        else:
+            manifest=download_hf_dataset(lab.directory,spec['repo'],config=spec['config'],split=spec['split'],limit=limit);path=Path(manifest['path']);origin=manifest
+    else:path=Path(path);origin=dict(path=str(path.resolve()),split='user_declared_test',source='local_fixture_not_verified_canonical')
+    if path.stat().st_size>128*1024*1024:raise ValueError('Benchmark excede orçamento')
+    rng=np.random.default_rng(seed);sample=[];seen=0
+    for row in iter_benchmark_rows(path):
+        seen+=1
+        if len(sample)<limit:sample.append(row)
+        else:
+            index=int(rng.integers(seen))
+            if index<limit:sample[index]=row
+    if not sample:raise ValueError('Benchmark vazio')
+    before=_bridge_arrays(agent.bridge);started=time.monotonic();results=[];exports=[];correct=0
+    for index,row in enumerate(sample):
+        if time.monotonic()-started>=seconds:break
+        if name in ('mmlu','arc'):
+            prompt,labels,target=benchmark_choice(row);scores={label:score_choice(lab.backend,agent.bridge,prompt,label) for label in labels};prediction=max(labels,key=lambda label:scores[label]);right=prediction==target;record=dict(index=index,prediction=prediction,target=target,correct=right,scores=scores)
+        elif name=='gsm8k':
+            prompt=str(row['question'])+'\nReturn the final numeric answer.';response,inspection=lab.backend.generate(lab.backend.encode(prompt),agent.bridge,np.zeros(48));target=canonical_numeric_answer(row['answer']);prediction=canonical_numeric_answer(response);right=target is not None and prediction==target;record=dict(index=index,prediction=prediction,target=target,correct=right,response=response)
+        else:
+            prompt=row['prompt'];response,_=lab.backend.generate(lab.backend.encode(prompt),agent.bridge,np.zeros(48));right=False;record=dict(index=index,task_id=row['task_id'],generated=True);exports.append(dict(task_id=row['task_id'],completion=response))
+        if isinstance(lab.backend,NativeSeq2Seq):record['input_truncated']=len(prompt)>lab.config.input_tokens
+        elif isinstance(lab.backend,EncoderDecoderCore):record['input_truncated']=len(lab.backend.tokenizer(prompt,truncation=False)['input_ids'])>lab.config.input_tokens
+        else:record['input_truncated']=False
+        correct+=int(right);record['item_sha256']=hashlib.sha256(json.dumps(row,sort_keys=True).encode()).hexdigest();results.append(record);lab.arena_state['progress']=dict(name=name,completed=len(results),total=len(sample),correct=correct,running=True);lab._refresh();lab.history.append('benchmark.item',identity,dict(name=name,**record))
+    if not results:raise ValueError('Nenhuma questão concluída dentro do orçamento')
+    for key,array in before.items():
+        if not np.array_equal(array,_bridge_arrays(agent.bridge)[key]):raise AssertionError('Avaliação não pode treinar o modelo')
+    checksum=hashlib.sha256(path.read_bytes()).hexdigest();protocol=dict(name=name,metric=spec['metric'],shots=0,solver_assisted=False,sampling='seeded_reservoir',seed=seed,requested=limit,dataset_sha256=checksum,decoding='greedy',thought_budget=lab.config.thought_budget,input_limit=lab.config.input_tokens,output_limit=lab.config.output_tokens,choice_scoring='sum_target_token_logprobs' if name in ('mmlu','arc') else None)
+    protocol_id=hashlib.sha256(json.dumps(protocol,sort_keys=True).encode()).hexdigest()
+    report=dict(name=name,model=lab.config.model,base_signature=lab.expected_signature,metric=spec['metric'],score=None if name=='humaneval' else correct/len(results),correct=correct if name!='humaneval' else None,count=len(results),truncated_inputs=sum(bool(r['input_truncated']) for r in results),available_rows=seen,protocol=protocol,protocol_id=protocol_id,origin=origin,elapsed_seconds=time.monotonic()-started,utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),source='measured_local',trained=False,limitations='Subset, tokenizer, prompt and decoding affect scores; not a canonical full-suite leaderboard claim; no OMNIMAT assistance in primary score')
+    if exports:
+        output=lab.directory/'benchmarks'/'humaneval-completions.jsonl';output.parent.mkdir(exist_ok=True);output.write_text(''.join(json.dumps(row)+'\n' for row in exports));report['completions']=str(output);report['limitations']='Only completions exported. No generated code executed; functional pass@1 requires an external isolated HumanEval harness.'
+    lab.arena_state['progress']=dict(name=name,completed=len(results),total=len(sample),correct=correct,running=False)
+    lab.arena_state['runs']=(lab.arena_state.get('runs',[])+[report])[-64:];lab.history.append('benchmark.completed',identity,report);return report
+
+
+@lab_operation
+def import_arena_references(lab,path):
+    path=Path(path)
+    if path.stat().st_size>1024*1024:raise ValueError('Referências excedem 1 MiB')
+    rows=list(iter_benchmark_rows(path))
+    if len(rows)>256:raise ValueError('Até 256 referências')
+    for row in rows:
+        if not all(isinstance(row.get(k),str) and row[k] for k in ('model','name','metric','source_url','protocol_id')) or not row['source_url'].startswith('https://') or type(row.get('score')) not in (float,int) or not 0<=row['score']<=1:raise ValueError('Referência deve indicar model/name/metric/source_url/protocol_id/score 0–1')
+        row['source']='externally_reported_not_locally_verified'
+    lab.arena_state['references']=rows;lab.history.append('benchmark.references','arena',rows);return dict(imported=len(rows))
+
+
+def arena_table(lab):
+    runs=lab.arena_state.get('runs',[]);refs=lab.arena_state.get('references',[]);lines=['Modelo | Benchmark | Nota | N | Comparabilidade / origem']
+    for row in runs[-12:]:
+        score='não medido' if row['score'] is None else f"{100*row['score']:.2f}%";lines.append(f"{row['model']} | {row['name']} | {score} | {row['count']} | medido localmente · {row['protocol_id'][:10]}")
+    for row in refs:
+        matching=any(r['protocol_id']==row['protocol_id'] and r['metric']==row['metric'] and r['name']==row['name'] for r in runs)
+        lines.append(f"{row['model']} | {row['name']} | {100*row['score']:.2f}% | externo | "+('mesmo protocolo declarado; fonte externa não verificada' if matching else 'não comparável: protocolo diferente/desconhecido')+' · '+row['source_url'])
+    return '\n'.join(lines)
+
+@lab_operation
+def refresh_arena_references(lab,url):
+    raw=dataset_http_get(url,max_bytes=1024*1024)
+    try:payload=json.loads(raw)
+    except json.JSONDecodeError:payload=[json.loads(line) for line in raw.decode().splitlines() if line.strip()]
+    rows=payload if isinstance(payload,list) else payload.get('references',[payload])
+    normalized=[]
+    for row in rows:
+        if 'results' in row:
+            model=row.get('model_name',row.get('config',{}).get('model_args','unknown'))
+            for task,result in row['results'].items():
+                name='gsm8k' if task.startswith('gsm8k') else 'mmlu' if task=='mmlu' else 'arc' if task.startswith('arc_challenge') else None
+                if not name:continue
+                scorekey=next((k for k in ('acc_norm,none','acc,none','exact_match,strict-match','exact_match,none') if k in result),None)
+                if scorekey:normalized.append(dict(model=str(model),name=name,metric=scorekey,score=result[scorekey],source_url=url,protocol_id='lm-eval-external-'+hashlib.sha256(json.dumps(row.get('configs',{}),sort_keys=True).encode()).hexdigest()))
+        else:normalized.append(dict(row,source_url=row.get('source_url',url),protocol_id=row.get('protocol_id','external-unspecified')))
+    path=lab.directory/'benchmarks'/'external-references.jsonl';path.parent.mkdir(exist_ok=True);path.write_text(''.join(json.dumps(row)+'\n' for row in normalized));result=import_arena_references(lab,path);result.update(url=url,sha256=hashlib.sha256(raw).hexdigest(),utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()));lab.history.append('benchmark.references_refreshed','arena',result);return result
+
+
+class NeuronProfiles:
+    """Até oito sessões vivas: pesos, SQLite, replay e permissões independentes."""
+    def __init__(self,root):self.root=Path(root).resolve();self.root.mkdir(parents=True,exist_ok=True);self.sessions={};self.borrowed=set();self.lock=threading.RLock()
+    def path(self,name):
+        if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,40}',name):raise ValueError('Perfil: 1–40 letras/números/_/-')
+        path=self.root/name
+        if path.is_symlink() or not path.resolve().is_relative_to(self.root):raise ValueError('Perfil fora da pasta autorizada')
+        return path
+    def attach(self,name,lab):
+        self.path(name);self.sessions[name]=lab;self.borrowed.add(name);lab.profile_hub=self;lab.profile_name=name
+    def open(self,name,*,model='compact:pt',mode='restrito',offline=True):
+        with self.lock:
+            path=self.path(name)
+            if name in self.sessions:return self.sessions[name]
+            if len(self.sessions)>=8:raise ValueError('Até oito perfis abertos por processo')
+            if mode not in ('restrito','irrestrito'):raise ValueError('Modo inválido')
+            lab=NeuronLaboratory(path,LabConfig(agents=1,seed=int.from_bytes(hashlib.sha256(name.encode()).digest()[:4],'little'),model=model,online_learning=True,evolution_mode=mode,constitutional_projection=mode=='restrito'))
+            try:lab.load_model(offline=offline)
+            except BaseException:lab.close();raise
+            self.sessions[name]=lab;lab.profile_hub=self;lab.profile_name=name;return lab
+    def list(self):
+        names=set(self.sessions)|{p.name for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and re.fullmatch(r'[A-Za-z0-9_-]{1,40}',p.name) and (p/'history.sqlite').is_file()}
+        return [dict(name=name,path=str(self.sessions[name].directory if name in self.sessions else self.path(name)),open=name in self.sessions,model=self.sessions[name].config.model if name in self.sessions else None) for name in sorted(names)]
+    def dialogue(self,names,topic,*,rounds=1):
+        if not isinstance(names,list) or not 2<=len(names)<=8 or len(set(names))!=len(names) or type(rounds) is not int or not 1<=rounds<=10 or not isinstance(topic,str) or not 1<=len(topic)<=1000:raise ValueError('Diálogo: 2–8 perfis distintos, 1–10 rodadas, tema até 1000 caracteres')
+        labs=[self.open(name) for name in names];previous=topic;results=[]
+        for number in range(rounds):
+            for name,lab in zip(names,labs):
+                event=lab.reply('NEURON-1','Tema: '+topic+'\nMensagem do outro perfil: '+previous[:1800],source='perfil:dialogue')
+                item=dict(profile=name,round=number+1,text=humanize_response(event));results.append(item);lab.history.append('profiles.dialogue',name,item);previous=item['text']
+        return results
+    def close(self):
+        for name,lab in list(self.sessions.items()):
+            if name not in self.borrowed:lab.close()
+        self.sessions={};self.borrowed.clear()
+
+
+LegacyAutoImprovementLoop=AutoImprovementLoop
+class AutoImprovementLoop(LegacyAutoImprovementLoop):
+    def start(self,*,rounds=5,interval=2.,teacher=False,dataset=None,grow=False,code=False,prune=False,benchmark=None,benchmark_file=None,benchmark_every=5):
+        self.lab._require_model()
+        if type(rounds) is not int or not 0<=rounds<=20 or type(interval) not in (int,float) or not 1<=interval<=60 or any(type(v) is not bool for v in (teacher,grow,code,prune)) or type(benchmark_every) is not int or not 1<=benchmark_every<=100:raise ValueError('Rounds 0–20 (zero=até parar), intervalo 1–60 s, benchmark_every 1–100')
+        if benchmark is not None and benchmark not in BENCHMARK_SPECS:raise ValueError('Benchmark desconhecido')
+        if dataset is not None:dataset=str(Path(dataset).resolve());load_agent_dataset(dataset)
+        if (grow or prune) and (dataset is None or not isinstance(self.lab.backend,NativeSeq2Seq) or len(self.lab.agents)!=1):raise ValueError('Crescimento requer dataset e RNN NumPy individual')
+        if self.thread and self.thread.is_alive():raise ValueError('Ciclo já está ativo')
+        if self.lab.curriculum.status()['running']:raise ValueError('Pause o currículo separado')
+        self.options=dict(rounds=rounds,interval=float(interval),teacher=teacher,dataset=dataset,grow=grow,code=code,prune=prune,benchmark=benchmark,benchmark_file=str(benchmark_file) if benchmark_file else None,benchmark_every=benchmark_every)
+        self.error=None;self.stop_event.clear();self.lab.history.append('auto.started','auto',self.options);self.thread=threading.Thread(target=self._loop,name='NEURON9-Evolution',daemon=True);self.thread.start();return self.status()
+    def _loop(self):
+        completed=0
+        while (self.options['rounds']==0 or completed<self.options['rounds']) and not self.stop_event.wait(self.options['interval']):
+            pending=getattr(self.lab,'foreground_queue',None)
+            if time.monotonic()-self.lab.last_activity<1 or pending is not None and not pending.empty():continue
+            if not self.lab._lock.acquire(False):continue
+            try:
+                if self.stop_event.is_set():break
+                self.round_once();completed+=1
+            except Exception as error:self.error=type(error).__name__+': '+str(error);self.lab.history.append('auto.failed','auto',dict(error=self.error));self.stop_event.set()
+            finally:self.lab._lock.release()
+        self.stop_event.set()
+    def round_once(self):
+        benchmark=self.options.get('benchmark');number=self.lab.auto_improvement_state['rounds']+1;evaluate=benchmark is not None and number%self.options.get('benchmark_every',5)==0
+        before=None;snapshot=None;old_backend=self.lab.backend
+        if evaluate:
+            before=run_arena_benchmark(self.lab,'NEURON-1',benchmark,path=self.options.get('benchmark_file'),limit=10,seconds=30.);snapshot=self.lab._save_bytes()
+        report=super().round_once()
+        # Tarefa numérica sintética treina DendriticCore, cujo grow() é limitado.
+        self.lab.numeric_step(batch=4)
+        if evaluate and not self.stop_event.is_set():
+            after=run_arena_benchmark(self.lab,'NEURON-1',benchmark,path=self.options.get('benchmark_file'),limit=10,seconds=30.)
+            comparable=before['protocol_id']==after['protocol_id'] and before['count']==after['count']
+            rejected=comparable and before['score'] is not None and after['score']<before['score']
+            if rejected:
+                state=copy.deepcopy(self.lab.auto_improvement_state);arena=copy.deepcopy(self.lab.arena_state);self.lab.backend=old_backend;self.lab._load_bytes(snapshot);self.lab.auto_improvement_state=state;self.lab.arena_state=arena
+            report['arena_gate']=dict(comparable=comparable,rollback=rejected,before=before['score'],after=after['score'],scope='Learner state only; equivalent scalar source rewrites are independent')
+            self.lab.history.append('auto.arena_gate','auto',report['arena_gate'])
+        self.lab.checkpoint();self.lab._refresh();return report
+
+
+def nine_chat_command(lab,message):
+    import shlex
+    pieces=shlex.split(message)
+    if not pieces:return None
+    command=pieces[0];identity='NEURON-1'
+    if command=='/modo':return json.dumps(set_neuron_mode(lab,pieces[1]),ensure_ascii=False)
+    if command=='/aprender':
+        if len(pieces)!=2 or pieces[1] not in ('ligar','desligar'):raise ValueError('/aprender ligar|desligar')
+        set_neuron_mode(lab,lab.config.evolution_mode,online=pieces[1]=='ligar');return 'Aprendizado online '+pieces[1]+'.'
+    if command=='/modelo':
+        if len(pieces)<2:raise ValueError('/modelo repo_encoder_decoder [--offline]')
+        result=swap_encoder_decoder(lab,pieces[1],offline='--offline' in pieces);return 'Modelo trocado sem reinício: '+result['model']+'; dimensão '+str(result['dimension'])+'. Migração geométrica não é identidade semântica.'
+    if command=='/hf':
+        if len(pieces)<2:raise ValueError('/hf owner/dataset [--split train] [--config default] [--limit 256] [--file shard.parquet] [--revision SHA] [--so-baixar]')
+        options={};index=2;train=True
+        while index<len(pieces):
+            if pieces[index]=='--so-baixar':train=False;index+=1;continue
+            names={'--split':'split','--config':'config','--limit':'limit','--file':'filename','--revision':'revision'}
+            if pieces[index] not in names or index+1>=len(pieces):raise ValueError('Opção HF desconhecida')
+            key=names[pieces[index]];options[key]=int(pieces[index+1]) if key=='limit' else pieces[index+1];index+=2
+        result=ingest_hf_dataset(lab,identity,pieces[1],train=train,**options);return 'Dataset '+result['download']['repo']+' baixado e registrado com SHA-256 '+result['download']['sha256'][:12]+'. '+('Treino promovido.' if result['learning'].get('accepted') else 'Dados processados; nenhum ganho foi presumido.')
+    if command=='/benchmark':
+        if len(pieces)<2:raise ValueError('/benchmark gsm8k|mmlu|arc|humaneval [--file caminho] [--limit 50]')
+        options={};index=2
+        while index<len(pieces):
+            if pieces[index] not in ('--file','--limit','--seconds') or index+1>=len(pieces):raise ValueError('Opção de benchmark desconhecida')
+            key={'--file':'path','--limit':'limit','--seconds':'seconds'}[pieces[index]];options[key]=int(pieces[index+1]) if key=='limit' else float(pieces[index+1]) if key=='seconds' else pieces[index+1];index+=2
+        result=run_arena_benchmark(lab,identity,pieces[1],**options);return arena_table(lab)+'\n'+result['limitations']
+    if command=='/dataset':
+        path,options=parse_dataset_chat(message);result=train_omni_dataset(lab,identity,path,**options);return omni_dataset_report(result)
+    if command=='/arena':
+        if len(pieces)>2 and pieces[1]=='atualizar':refresh_arena_references(lab,pieces[2])
+        if len(pieces)>2 and pieces[1]=='referencias':import_arena_references(lab,pieces[2])
+        return arena_table(lab)
+    if command=='/perfil':
+        hub=getattr(lab,'profile_hub',None)
+        if hub is None:raise ValueError('Gerenciador de perfis disponível no chat interativo ou via profiles CLI')
+        verb=pieces[1] if len(pieces)>1 else 'listar'
+        if verb=='listar':return '\n'.join(f"{r['name']} · {r['model'] or 'fechado'} · {r['path']}" for r in hub.list())
+        if verb in ('criar','usar') and len(pieces)>=3:
+            model='compact:pt';mode='restrito'
+            if '--model' in pieces:model=pieces[pieces.index('--model')+1]
+            if '--mode' in pieces:mode=pieces[pieces.index('--mode')+1]
+            new=hub.open(pieces[2],model=model,mode=mode,offline='--download' not in pieces)
+            return dict(switch_profile=new,name=pieces[2])
+        raise ValueError('/perfil listar | /perfil criar|usar nome [--model numpy:tiny] [--mode irrestrito]')
+    if command=='/conversar':
+        if len(pieces)<4:raise ValueError('/conversar perfilA perfilB "tema"')
+        result=lab.profile_hub.dialogue(pieces[1:3],' '.join(pieces[3:]));return '\n\n'.join(row['profile']+': '+row['text'] for row in result)
+    return None
+
+
+NINE_ACTIONS={'nine_mode','nine_hf','nine_benchmark','nine_swap','nine_references'}
+@lab_operation
+def nine_web_action(lab,item):
+    identity=item.get('agent','NEURON-1');action=item['action']
+    if action=='nine_mode':return set_neuron_mode(lab,item['mode'],online=item.get('online',True))
+    if action=='nine_hf':return ingest_hf_dataset(lab,identity,item['repo'],split=item.get('split','train'),limit=item.get('limit',256))
+    if action=='nine_benchmark':return run_arena_benchmark(lab,identity,item['name'],limit=item.get('limit',20))
+    if action=='nine_swap':return swap_encoder_decoder(lab,item['model'])
+    if action=='nine_references':return import_arena_references(lab,item['path'])
+    raise ValueError('Ação desconhecida')
+
+
+def nine_natural_command(prompt):
+    text=prompt.strip();match=re.fullmatch(r'(?:NEURON[, :]+)?(?:baixe|importe)(?: o)? dataset ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?: do Hugging Face)?(?: e treine(?: suas matrizes)? nele)?[.!]?',text,re.I)
+    if match:return '/hf '+match[1]
+    match=re.fullmatch(r'(?:troque|mude)(?: o)? modelo(?: para)? ([A-Za-z0-9_./-]+)[.!]?',text,re.I)
+    if match:return '/modelo '+match[1]
+    match=re.fullmatch(r'(?:rode|execute)(?: o)? benchmark (gsm8k|mmlu|arc|humaneval)[.!]?',text,re.I)
+    if match:return '/benchmark '+match[1].lower()
+    return None
+
+
+def add_nine_commands(commands):
+    hf=commands.add_parser('hf-dataset',help='Baixa snapshot HF e treina ou importa no perfil')
+    hf.add_argument('repo');hf.add_argument('--directory',type=Path,default=Path('neuron_data/sessao'));hf.add_argument('--config');hf.add_argument('--split',default='train');hf.add_argument('--limit',type=int,default=256);hf.add_argument('--revision',default='main');hf.add_argument('--file');hf.add_argument('--no-train',action='store_true');hf.add_argument('--model',default='compact:pt')
+    arena=commands.add_parser('arena',help='Benchmarks locais/canônicos, sem notas inventadas')
+    arena.add_argument('name',choices=(*BENCHMARK_SPECS,'table'));arena.add_argument('--file',type=Path);arena.add_argument('--limit',type=int,default=50);arena.add_argument('--seconds',type=float,default=120.);arena.add_argument('--directory',type=Path,default=Path('neuron_data/sessao'));arena.add_argument('--model',default='numpy:tiny');arena.add_argument('--references',type=Path)
+    profiles=commands.add_parser('profiles',help='Perfis independentes e conversas entre perfis')
+    profiles.add_argument('mode',choices=('list','create','dialogue'));profiles.add_argument('names',nargs='*');profiles.add_argument('--root',type=Path,default=Path('neuron_data/perfis'));profiles.add_argument('--model',default='compact:pt');profiles.add_argument('--topic',default='Como melhorar a retenção?');profiles.add_argument('--rounds',type=int,default=1)
+    return {'hf-dataset','arena','profiles'}
+
+
+def run_nine_cli(args):
+    if args.command=='profiles':
+        hub=NeuronProfiles(args.root)
+        try:
+            if args.mode=='create':
+                if len(args.names)!=1:raise ValueError('Forneça um nome')
+                lab=hub.open(args.names[0],model=args.model);print('Perfil criado: '+str(lab.directory))
+            elif args.mode=='dialogue':
+                for row in hub.dialogue(args.names,args.topic,rounds=args.rounds):print(row['profile']+': '+row['text'])
+            else:
+                for row in hub.list():print(row['name']+' · '+row['path'])
+        finally:hub.close()
+        return 0
+    with NeuronLaboratory(args.directory,LabConfig(agents=1,model=args.model)) as lab:
+        lab.load_model(offline=True)
+        if args.command=='hf-dataset':
+            result=ingest_hf_dataset(lab,'NEURON-1',args.repo,train=not args.no_train,config=args.config,split=args.split,limit=args.limit,revision=args.revision,filename=args.file);print(json.dumps(result,ensure_ascii=False,indent=2))
+        elif args.command=='arena':
+            if args.references:import_arena_references(lab,args.references)
+            if args.name!='table':run_arena_benchmark(lab,'NEURON-1',args.name,path=args.file,limit=args.limit,seconds=args.seconds)
+            print(arena_table(lab))
+    return 0
+
+
+def omni_dataset_report(result):
+    if 'baseline' in result:return dataset_human_report(result)
+    return ('Candidato promovido.' if result['accepted'] else 'Candidato rejeitado; pesos ativos preservados.')+f" Holdout NLL: {result['holdout_before']:.4f} → {result['holdout_after']:.4f}; atualizações aceitas: {result['updates']}. Retenção local não garante ausência de esquecimento."
+
+
+class OmniNineTests(unittest.TestCase):
+    def lab(self,d,**kwargs):
+        values=dict(agents=1,model='numpy:tiny',input_tokens=32,output_tokens=4,online_learning=True);values.update(kwargs)
+        return NeuronLaboratory(Path(d),LabConfig(**values),min_free_mb=0)
+    def test_online_user_turn_updates_real_weights_and_restores_replay(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.lab(d) as lab:
+                lab.load_model();before=bridge_parameters(lab.backend,lab.agents[0].bridge);agent_intent_dispatch(lab,'NEURON-1','ola')
+                report=lab.agents[0].last_online;self.assertGreater(report['delta_l2'],0);self.assertEqual(report['source'],'user_text_reconstruction_unverified');self.assertTrue(any(np.any(v!=lab.agents[0].bridge.arrays[k]) for k,v in before.items()))
+            with self.lab(d) as lab:lab.load_model();self.assertEqual(len(lab.agents[0].online_replay),1);self.assertIsNotNone(lab.agents[0].last_online)
+    def test_online_disabled_does_not_update_language_parameters(self):
+        with tempfile.TemporaryDirectory() as d,self.lab(d,online_learning=False) as lab:
+            lab.load_model();before=_bridge_arrays(lab.agents[0].bridge);lab.reply('NEURON-1','oi')
+            for k,v in before.items():np.testing.assert_array_equal(v,lab.agents[0].bridge.arrays[k])
+    def test_modes_do_not_grant_tool_permissions(self):
+        with tempfile.TemporaryDirectory() as d,self.lab(d) as lab:
+            lab.load_model();set_neuron_mode(lab,'irrestrito');self.assertFalse(lab.config.constitutional_projection);self.assertFalse(lab.tool_policy.allow_write);self.assertFalse(lab.tool_policy.commands)
+            set_neuron_mode(lab,'restrito');self.assertTrue(lab.config.constitutional_projection);self.assertTrue(lab.agents[0].task.config.constitutional_projection);self.assertTrue(lab.agents[0].unit.world_model.models[0].config.constitutional_projection)
+    def test_online_tcp_uses_same_parameter_space_replay(self):
+        core=NativeSeq2Seq(LabConfig(model='numpy:tiny',input_tokens=16,output_tokens=4),dimension=8);bridge=core.new_bridge(0);memory=[('old','a',np.zeros(48).tolist())]
+        report=tcp_train_pair(core,bridge,'new','b',np.zeros(48),memory,constitution=True,rate=.03)
+        self.assertEqual(report['replay_constraints'],1);self.assertLessEqual(report['max_memory_dot'],1e-8);self.assertLessEqual(report['constitutional_violation'],1e-8)
+        self.assertLessEqual(report['retention_after'][0],report['retention_before'][0]+.02)
+    def test_online_exception_restores_parameters(self):
+        from unittest.mock import patch
+        core=NativeSeq2Seq(LabConfig(model='numpy:tiny',output_tokens=2),dimension=8);bridge=core.new_bridge(0);before=_bridge_arrays(bridge);original=bridge_loss_grad;calls=[0]
+        def failing(*args,**kwargs):
+            calls[0]+=1
+            if calls[0]==2:raise RuntimeError('validation failure')
+            return original(*args,**kwargs)
+        with patch.object(sys.modules[__name__],'bridge_loss_grad',side_effect=failing):
+            with self.assertRaises(RuntimeError):tcp_train_pair(core,bridge,'x','y',np.zeros(48))
+        for k,v in before.items():np.testing.assert_array_equal(v,bridge.arrays[k])
+    def test_torch_online_gradients_update_bridge_not_backbone(self):
+        helper=LaboratoryTests();cfg=helper.cfg(agents=1,online_learning=True);core=helper.core(cfg);bridge=core.new_bridge(2);backbone=[p.detach().clone() for p in core.model.parameters()]
+        report=tcp_train_pair(core,bridge,'Olá mundo','sim',np.ones(48)*.2,rate=.03)
+        self.assertGreater(report['delta_l2'],0);self.assertFalse(report['backbone_updated'])
+        for before,p in zip(backbone,core.model.parameters()):self.assertTrue(core.torch.equal(before,p))
+    def test_columnar_ipc_file_stream_feather_and_parquet_roundtrip(self):
+        try:
+            import pyarrow as pa
+            import pyarrow.ipc as ipc
+            import pyarrow.parquet as pq
+            import pyarrow.feather as feather
+        except ImportError:self.skipTest('pyarrow opcional não instalado')
+        with tempfile.TemporaryDirectory() as d:
+            table=pa.table({'input':['Q '+str(i) for i in range(10)],'output':['A '+str(i) for i in range(10)]})
+            paths=[Path(d)/name for name in ('file.arrow','stream.arrow','data.feather','data.parquet')]
+            with pa.OSFile(str(paths[0]),'wb') as out:
+                with ipc.new_file(out,table.schema) as writer:writer.write_table(table)
+            with pa.OSFile(str(paths[1]),'wb') as out:
+                with ipc.new_stream(out,table.schema) as writer:writer.write_table(table)
+            feather.write_feather(table,paths[2]);pq.write_table(table,paths[3])
+            for path in paths:
+                self.assertEqual(len(list(iter_columnar_records(path))),10);self.assertEqual(load_agent_dataset(path)['sampled'],10)
+    def test_hf_pagination_writes_exact_snapshot_and_manifest(self):
+        from unittest.mock import patch
+        def get(url,**kwargs):
+            if '/splits?' in url:return json.dumps(dict(splits=[dict(config='default',split='train')])).encode()
+            from urllib.parse import parse_qs,urlsplit
+            query=parse_qs(urlsplit(url).query);offset=int(query['offset'][0]);length=int(query['length'][0]);return json.dumps(dict(rows=[dict(row=dict(input='Q '+str(i),output='A'),truncated_cells=[]) for i in range(offset,offset+length)])).encode()
+        with tempfile.TemporaryDirectory() as d,patch.object(sys.modules[__name__],'dataset_http_get',side_effect=get) as http:
+            report=download_hf_dataset(Path(d),'org/data',limit=105);self.assertEqual(report['records'],105);self.assertEqual(http.call_count,3);self.assertEqual(hashlib.sha256(Path(report['path']).read_bytes()).hexdigest(),report['sha256']);self.assertFalse(report['revision_pinned'])
+    def test_hf_refuses_truncation_and_nonpinned_rows_revision(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ValueError):download_hf_dataset(Path(d),'org/data',revision='a'*40)
+            with patch.object(sys.modules[__name__],'dataset_http_get',side_effect=[json.dumps(dict(splits=[dict(config='x',split='train')])).encode(),json.dumps(dict(rows=[dict(row={},truncated_cells=['answer'])])).encode()]):
+                with self.assertRaisesRegex(ValueError,'truncou'):download_hf_dataset(Path(d),'org/data')
+    def test_hf_explicit_shard_pins_commit_and_blocks_path_escape(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,patch.object(sys.modules[__name__],'dataset_http_get',return_value=b'input,output\na,b\n'):
+            report=download_hf_dataset(Path(d),'org/data',filename='data/train.csv',revision='a'*40);self.assertTrue(report['revision_pinned'])
+            with self.assertRaises(ValueError):download_hf_dataset(Path(d),'org/data',filename='../x.csv')
+    def test_network_client_refuses_unknown_hosts_before_request(self):
+        for url in ('http://huggingface.co/a','https://evil.test/data','https://user:pass@huggingface.co/data','https://127.0.0.1/data'):
+            with self.assertRaises(ValueError):dataset_http_get(url)
+    def test_mc_protocol_scores_likelihood_without_training_or_math_router(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(Path(d)/'session') as lab:
+            lab.load_model();before=_bridge_arrays(lab.agents[0].bridge);path=Path(d)/'mmlu.jsonl';path.write_text(json.dumps(dict(question='Choose A',choices=['yes','no'],answer=0))+'\n')
+            with patch.object(sys.modules[__name__],'score_choice',side_effect=lambda core,b,p,label:1 if label=='A' else 0),patch.object(lab,'reply',side_effect=AssertionError('benchmark trained or used solver')):
+                result=run_arena_benchmark(lab,'NEURON-1','mmlu',path=path,limit=1)
+            self.assertEqual(result['score'],1);self.assertFalse(result['trained']);self.assertFalse(result['protocol']['solver_assisted'])
+            for k,v in before.items():np.testing.assert_array_equal(v,lab.agents[0].bridge.arrays[k])
+    def test_numeric_gsm8k_score_is_exact_and_audited(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(Path(d)/'session') as lab:
+            lab.load_model();path=Path(d)/'gsm.jsonl';path.write_text(json.dumps(dict(question='A word problem',answer='reasoning\n#### 1200'))+'\n')
+            with patch.object(lab.backend,'generate',return_value=('The final answer is 1,200.',{})):result=run_arena_benchmark(lab,'NEURON-1','gsm8k',path=path,limit=1)
+            self.assertEqual(result['score'],1.);self.assertTrue(list(lab.history.iter_events(kind='benchmark.item')));self.assertEqual(canonical_numeric_answer('#### 0.5'),canonical_numeric_answer('1/2'))
+    def test_humaneval_exports_without_fabricated_pass_score(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(Path(d)/'session') as lab:
+            lab.load_model();path=Path(d)/'code.jsonl';path.write_text(json.dumps(dict(task_id='HumanEval/0',prompt='def f():'))+'\n')
+            with patch.object(lab.backend,'generate',return_value=('return 1',{})):result=run_arena_benchmark(lab,'NEURON-1','humaneval',path=path,limit=1)
+            self.assertIsNone(result['score']);self.assertTrue(Path(result['completions']).is_file())
+    def test_reference_tables_reject_fabricated_or_noncomparable_protocols(self):
+        with tempfile.TemporaryDirectory() as d,self.lab(Path(d)/'session') as lab:
+            path=Path(d)/'refs.jsonl';path.write_text(json.dumps(dict(model='External',name='gsm8k',metric='numeric_exact_match',score=.8,source_url='https://example.org/report',protocol_id='different'))+'\n');import_arena_references(lab,path);self.assertIn('não comparável',arena_table(lab))
+            path.write_text(json.dumps(dict(model='External',score=.8))+'\n')
+            with self.assertRaises(ValueError):import_arena_references(lab,path)
+    def test_profiles_keep_independent_bridges_databases_and_permissions(self):
+        with tempfile.TemporaryDirectory() as d:
+            hub=NeuronProfiles(Path(d));a=hub.open('alice',model='numpy:tiny');b=hub.open('bob',model='numpy:tiny');before=_bridge_arrays(b.agents[0].bridge);agent_intent_dispatch(a,'NEURON-1','hello')
+            self.assertNotEqual(a.history.path,b.history.path);self.assertIsNot(a.agents[0].bridge,b.agents[0].bridge)
+            for k,v in before.items():np.testing.assert_array_equal(v,b.agents[0].bridge.arrays[k])
+            self.assertFalse(b.tool_policy.allow_write);hub.close()
+    def test_profile_names_and_symlinks_cannot_escape_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            hub=NeuronProfiles(Path(d))
+            for name in ('../other','a/b','.', ''):
+                with self.assertRaises(ValueError):hub.path(name)
+            (Path(d)/'link').symlink_to('/tmp',target_is_directory=True)
+            with self.assertRaises(ValueError):hub.path('link')
+            hub.close()
+    def test_cross_profile_dialogue_is_real_and_not_trusted_supervision(self):
+        with tempfile.TemporaryDirectory() as d:
+            hub=NeuronProfiles(Path(d));a=hub.open('alice');b=hub.open('bob');rows=hub.dialogue(['alice','bob'],'Como aprender?');self.assertEqual(len(rows),2);self.assertTrue(list(a.history.iter_events(kind='profiles.dialogue')));self.assertFalse(list(b.history.iter_events(kind='online.update')));hub.close()
+    def test_hot_model_swap_keeps_memories_and_rolls_back_failed_retention(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(d) as lab:
+            lab.load_model();old=lab.backend;lab.agents[0].memories.append(dict(question='Q',answer='A',features=np.zeros(32).tolist(),kind='teaching'));lab.checkpoint();candidate=NativeSeq2Seq(dataclasses.replace(lab.config,model='numpy:tiny'))
+            with patch.object(sys.modules[__name__],'seq2seq_loss',side_effect=[.1,10.]):
+                with self.assertRaises(ValueError):swap_encoder_decoder(lab,'numpy:tiny',candidate_core=candidate)
+            self.assertIs(lab.backend,old);self.assertEqual(lab.agents[0].memories[-1]['answer'],'A')
+    def test_torch_svd_migration_supports_different_hidden_sizes(self):
+        helper=LaboratoryTests();cfg=helper.cfg(agents=1);old=helper.core(cfg)
+        from transformers import T5Config,T5ForConditionalGeneration
+        desc=T5Config(vocab_size=old.model.config.vocab_size,d_model=48,d_kv=8,d_ff=96,num_layers=1,num_decoder_layers=1,num_heads=2,decoder_start_token_id=0,pad_token_id=0,eos_token_id=1,dropout_rate=0.);desc._attn_implementation='eager'
+        new=EncoderDecoderCore.from_components(dataclasses.replace(cfg,bridge_rank=6),old.tokenizer,T5ForConditionalGeneration(desc),identity='new-random-test');source=old.new_bridge(3);target=new.new_bridge(4);migrate_seq2seq_bridge(old,source,new,target)
+        self.assertEqual(tuple(target.down.weight.shape),(6,48));self.assertTrue(all(np.isfinite(v).all() for v in _bridge_arrays(target).values()));self.assertTrue(math.isfinite(seq2seq_loss(new,target,'Olá','sim')))
+    def test_continuous_auto_is_explicit_and_stoppable(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(d,model='compact:pt') as lab:
+            lab.load_model();loop=AutoImprovementLoop(lab);lab.auto_improvement=loop;done=threading.Event()
+            with patch.object(loop,'round_once',side_effect=lambda:done.set() or {}):
+                lab.last_activity=0;loop.start(rounds=0,interval=1.);self.assertTrue(done.wait(4));loop.stop()
+            self.assertFalse(loop.thread.is_alive());self.assertEqual(loop.options['rounds'],0)
+    def test_natural_hf_and_benchmark_routes_are_explicit(self):
+        self.assertEqual(nine_natural_command('NEURON, baixe o dataset tatsu-lab/alpaca do Hugging Face e treine suas matrizes nele.'),'/hf tatsu-lab/alpaca');self.assertEqual(nine_natural_command('Rode o benchmark GSM8K.'),'/benchmark gsm8k');self.assertIsNone(nine_natural_command('Não baixe dataset algum'))
+    def test_arena_and_online_state_resume_in_checkpoint(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.lab(d) as lab:
+                lab.arena_state['references']=[dict(model='ref',name='x',metric='x',score=0.,source_url='https://example.org',protocol_id='x')];set_neuron_mode(lab,'irrestrito',online=True)
+            with self.lab(d) as lab:self.assertEqual(lab.arena_state['references'][0]['model'],'ref');self.assertEqual(lab.config.evolution_mode,'irrestrito');self.assertTrue(lab.config.online_learning)
+    def test_neuron9_panel_is_local_and_exposes_real_operations(self):
+        for marker in ('nine-online','nine-mode','nine-model','nine-hf','nine-arena','nine_benchmark'):self.assertIn(marker,LAB_HTML)
+        self.assertNotIn('<script src="https://',LAB_HTML)
+    def test_hf_download_only_never_changes_weights_or_imports(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(d) as lab:
+            lab.load_model();before=_bridge_arrays(lab.agents[0].bridge);path=Path(d)/'data.jsonl';path.write_text('{}\n')
+            with patch.object(sys.modules[__name__],'download_hf_dataset',return_value=dict(path=str(path),repo='org/data',sha256='abc')),patch.object(sys.modules[__name__],'train_omni_dataset',side_effect=AssertionError('unexpected train')):
+                result=ingest_hf_dataset(lab,'NEURON-1','org/data',train=False)
+            self.assertTrue(result['learning']['download_only'])
+            for k,v in before.items():np.testing.assert_array_equal(v,lab.agents[0].bridge.arrays[k])
+    def test_live_reference_refresh_parses_lm_eval_and_keeps_protocol_external(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(d) as lab:
+            data=dict(model_name='External model',results={'gsm8k':{'exact_match,strict-match':.5}})
+            with patch.object(sys.modules[__name__],'dataset_http_get',return_value=json.dumps(data).encode()):result=refresh_arena_references(lab,'https://raw.githubusercontent.com/example/results/main/score.json')
+            self.assertEqual(result['imported'],1);self.assertIn('External model',arena_table(lab));self.assertIn('não comparável',arena_table(lab))
+    def test_hot_swap_accepts_new_torch_core_keeps_live_session_and_backup(self):
+        helper=LaboratoryTests();cfg=helper.cfg(agents=1);old=helper.core(cfg);new=helper.core(cfg,architecture='bart',seed=78)
+        with tempfile.TemporaryDirectory() as d,NeuronLaboratory(Path(d),cfg,backend=old,min_free_mb=0) as lab:
+            result=swap_encoder_decoder(lab,'local-bart-test',candidate_core=new);self.assertIs(lab.backend,new);self.assertFalse(result['restart_required']);self.assertTrue(Path(result['backup']).is_file());self.assertTrue(lab.agents[0].bridge is not None)
+    def test_seq2seq_dataset_training_uses_tcp_and_holdout(self):
+        helper=LaboratoryTests();cfg=helper.cfg(agents=1);core=helper.core(cfg)
+        with tempfile.TemporaryDirectory() as d,NeuronLaboratory(Path(d)/'session',cfg,backend=core,min_free_mb=0) as lab:
+            path=Path(d)/'data.jsonl';path.write_text(''.join(json.dumps(dict(input='Olá '+str(i),output='sim'))+'\n' for i in range(8)))
+            result=train_omni_dataset(lab,'NEURON-1',path,epochs=1,seconds=4.);self.assertGreater(result['updates'],0);self.assertLess(result['holdout_after'],result['holdout_before']);self.assertFalse(result['backbone_updated'])
+    def test_auto_public_benchmark_regression_restores_learner(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(d) as lab:
+            lab.load_model();before=_bridge_arrays(lab.agents[0].bridge);manager=AutoImprovementLoop(lab);manager.options=dict(benchmark='gsm8k',benchmark_every=1)
+            def mutate(*args,**kwargs):lab.agents[0].bridge.arrays['b']+=.3;lab.auto_improvement_state['rounds']=1;return {}
+            reports=[dict(protocol_id='same',count=1,score=1.),dict(protocol_id='same',count=1,score=0.)]
+            with patch.object(sys.modules[__name__],'run_arena_benchmark',side_effect=reports),patch.object(LegacyAutoImprovementLoop,'round_once',side_effect=mutate),patch.object(lab,'numeric_step',return_value={}):result=manager.round_once()
+            self.assertTrue(result['arena_gate']['rollback']);self.assertEqual(lab.auto_improvement_state['rounds'],1)
+            for k,v in before.items():np.testing.assert_array_equal(v,lab.agents[0].bridge.arrays[k])
+    def test_pretrained_bridge_can_run_verified_synthetic_curriculum(self):
+        helper=LaboratoryTests();cfg=helper.cfg(agents=1);core=helper.core(cfg)
+        with tempfile.TemporaryDirectory() as d,NeuronLaboratory(Path(d),cfg,backend=core,min_free_mb=0) as lab:
+            result=lab.curriculum_step('NEURON-1',teacher=True,family='arithmetic');self.assertIsNotNone(result['training']);self.assertEqual(result['observations_before'],result['observations_after']);self.assertEqual(result['mode'],'verified_teacher')
+    def test_activation_ranked_pruning_builds_real_smaller_candidate(self):
+        core=NativeSeq2Seq(LabConfig(model='numpy:tiny',output_tokens=4),dimension=24);bridge=core.new_bridge(0);core.last_tensors=dict(decoder_hidden=np.tile(np.arange(24),(3,1)))
+        candidate,new=pruned_native_candidate(core,bridge);self.assertEqual(candidate.dimension,16);self.assertEqual(new.arrays['D'].shape,(16,16));np.testing.assert_array_equal(new.arrays['E'],bridge.arrays['E'][:,8:]);self.assertTrue(math.isfinite(candidate.loss_grad(candidate.encode('x'),new,np.zeros(48),'y')[0]))
+    def test_pruning_only_promotes_after_measured_holdout_and_retention(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as d,self.lab(Path(d)/'session') as lab:
+            lab.load_model();path=Path(d)/'pairs.jsonl';path.write_text(''.join(json.dumps(dict(input='Q'+str(i),output='5'))+'\n' for i in range(6)))
+            values=[dict(loss=v,metric='test',examples=1) for v in (2.,1.,1.,1.)]
+            with patch.object(sys.modules[__name__],'dataset_measure',side_effect=values):result=train_omni_dataset(lab,'NEURON-1',path,epochs=1,prune=True,seconds=1.)
+            self.assertTrue(result['accepted']);self.assertEqual(lab.backend.dimension,24);self.assertIn('pruning',result['architecture']['method'])
+
+
 def main(argv: Iterable[str] | None = None) -> int:
     effective = list(argv) if argv is not None else sys.argv[1:]
     if effective == ['_kernel-benchmark']:
@@ -16146,9 +17054,15 @@ def main(argv: Iterable[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command")
     advanced_commands=add_advanced_commands(commands)
     eight_commands=add_eight_commands(commands)
+    nine_commands=add_nine_commands(commands)
     agent_command=commands.add_parser('agent',help='Conversa natural local com ferramentas autorizadas')
     agent_command.add_argument('--directory',type=Path,default=Path('neuron_data/sessao'))
     agent_command.add_argument('--model',default='compact:pt')
+    agent_command.add_argument('--mode',choices=('restrito','irrestrito'),default='restrito')
+    agent_command.add_argument('--online-learning',action=argparse.BooleanOptionalAction,default=True)
+    agent_command.add_argument('--profile')
+    agent_command.add_argument('--profiles-root',type=Path,default=Path('neuron_data/perfis'))
+    agent_command.add_argument('--download',action='store_true')
     agent_command.add_argument('--thought-budget',type=int,default=0)
     agent_command.add_argument('--constitution',action='store_true')
     agent_command.add_argument('--effort',choices=('baixo','medio','alto','muito_alto','maximo','personalizado'),default='medio')
@@ -16162,6 +17076,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     dataset_command.add_argument('--epochs',type=int,default=2)
     dataset_command.add_argument('--seconds',type=float,default=30.)
     dataset_command.add_argument('--grow',action='store_true')
+    dataset_command.add_argument('--prune',action='store_true')
     import_command=commands.add_parser('import-data',help='Importa documentos/datasets para memória compacta; PDF sem OCR')
     import_command.add_argument('path',type=Path)
     import_command.add_argument('--directory',type=Path,default=Path('neuron_data/sessao'))
@@ -16288,16 +17203,19 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.command is not None:parser.error('--menu não aceita subcomando')
         return neuron_menu()
     try:
-        if args.command is None:return run_autonomous_agent(Path('neuron_data/sessao'),LabConfig(agents=1,model='compact:pt'))
+        if args.command is None:return run_autonomous_agent(Path('neuron_data/sessao'),LabConfig(agents=1,model='compact:pt',online_learning=True,constitutional_projection=True))
         if args.command=='import-data':
             with NeuronLaboratory(args.directory,LabConfig(agents=1,model='compact:pt')) as lab:
                 lab.load_model(offline=True);result=import_agent_data(lab,'NEURON-1',args.path);print('Importação concluída: '+str(result['records'])+' blocos/exemplos. Nenhuma melhora foi presumida.')
             return 0
         if args.command=='dataset':
             with NeuronLaboratory(args.directory,LabConfig(agents=1,model=args.model)) as lab:
-                lab.load_model(offline=True);print(dataset_human_report(train_agent_dataset(lab,'NEURON-1',args.path,epochs=args.epochs,grow=args.grow,seconds=args.seconds)))
+                lab.load_model(offline=True);print(omni_dataset_report(train_omni_dataset(lab,'NEURON-1',args.path,epochs=args.epochs,grow=args.grow,prune=args.prune,seconds=args.seconds)))
             return 0
-        if args.command=='agent':return run_autonomous_agent(args.directory,LabConfig(agents=1,model=args.model,thought_budget=args.thought_budget,constitutional_projection=args.constitution,reasoning_effort=args.effort,reasoning_visible=args.reasoning,reasoning_custom_budget=args.effort_steps,reasoning_custom_seconds=args.effort_seconds))
+        if args.command=='agent':
+            directory=NeuronProfiles(args.profiles_root).path(args.profile) if args.profile else args.directory
+            return run_autonomous_agent(directory,LabConfig(agents=1,model=args.model,thought_budget=args.thought_budget,constitutional_projection=args.constitution or args.mode=='restrito',reasoning_effort=args.effort,reasoning_visible=args.reasoning,reasoning_custom_budget=args.effort_steps,reasoning_custom_seconds=args.effort_seconds,online_learning=args.online_learning,evolution_mode=args.mode),profiles_root=args.profiles_root,offline=not args.download)
+        if args.command in nine_commands:return run_nine_cli(args)
         if args.command in eight_commands:return run_eight_cli(args)
         if args.command in advanced_commands:return run_advanced_cli(args)
         if args.command in seed_commands:return run_seed_cli(args)
@@ -16328,7 +17246,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             return 0
         if args.command == "selftest":
             suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case)
-                                       for case in (NeuronTests, CognitiveTests, EvolutionTests, LaboratoryTests, FormalIntegrationTests, SeedIntegrationTests, SevenIntegrationTests, EightIntegrationTests, AgentBootTests))
+                                       for case in (NeuronTests, CognitiveTests, EvolutionTests, LaboratoryTests, FormalIntegrationTests, SeedIntegrationTests, SevenIntegrationTests, EightIntegrationTests, AgentBootTests, OmniNineTests))
             return 0 if unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful() else 1
         if args.command == "cognitive-demo":
             result = run_logged_experiment(args)
